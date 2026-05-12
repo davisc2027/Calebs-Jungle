@@ -1,0 +1,6 @@
+services:
+  - type: web
+    name: calebs-jungle
+    env: static
+    staticPublishPath: .
+    buildCommand: ""
