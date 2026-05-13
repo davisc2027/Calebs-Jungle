@@ -2570,7 +2570,7 @@ function interact(){
     inPlane=true; planeYaw=planeGroup.rotation.y; planePitchAng=0;
     planeLookYaw=0; planeLookPitch=0; P.yaw=planeYaw; P.pitch=0;
     startJetEngine();
-    showMessage('🛩️ F-22 RAPTOR! WASD=steer · LMB=guns · SPACE=missile · E=bail',4500); playFX('jump'); return;
+    showMessage('🛩️ F-22 RAPTOR! WASD=steer & aim · LMB=cannons · SPACE=missile · E=bail',4500); playFX('jump'); return;
   }
   if(inPlane){
     inPlane=false; stopJetEngine();
@@ -3213,26 +3213,31 @@ function updatePlayer(dt){
 // ────────────────────────────────────────────────
 function updateCamera(dt){
   const sens = P.scoped ? 0.0007 : 0.0022;
-  if(locked){P.yaw-=mouseDX*sens;P.pitch=Math.max(-.55,Math.min(1.3,P.pitch-mouseDY*sens));mouseDX=0;mouseDY=0;}
+  // Only apply mouse look when on foot — eat the deltas either way to prevent drift
+  if(locked){
+    if(!inPlane){P.yaw-=mouseDX*sens;P.pitch=Math.max(-.55,Math.min(1.3,P.pitch-mouseDY*sens));}
+    mouseDX=0; mouseDY=0;
+  }
 
-  // ── Cockpit view while flying ────────────────────
+  // ── Smooth chase camera while flying ─────────────
   if(inPlane && planeGroup){
-    // Accumulate cockpit-relative look offsets from mouse (already consumed above)
-    planeLookYaw   = P.yaw - planeYaw;          // offset from plane heading
-    planeLookPitch = Math.max(-0.6, Math.min(0.8, P.pitch));
-    // Position camera at cockpit (local +X=forward, +Y=up)
-    const cockpitOfs = new THREE.Vector3(3.5, 1.45, 0);
-    cockpitOfs.applyQuaternion(planeGroup.quaternion);
-    camera.position.copy(planeGroup.position).add(cockpitOfs);
-    // Look direction = plane heading + mouse offset
-    const totalYaw   = planeYaw + planeLookYaw;
-    const totalPitch = planePitchAng + planeLookPitch;
-    const sinTY=Math.sin(totalYaw),cosTY=Math.cos(totalYaw);
-    const cosTP=Math.cos(totalPitch),sinTP=Math.sin(totalPitch);
-    const lookTarget = camera.position.clone().add(
-      new THREE.Vector3(sinTY*cosTP, sinTP, cosTY*cosTP).multiplyScalar(20)
-    );
-    camera.lookAt(lookTarget);
+    // The plane travels along (sin(planeYaw), -pitchAng, cos(planeYaw))
+    const fwdX=Math.sin(planeYaw), fwdZ=Math.cos(planeYaw);
+    // Sit 18 units behind the travel direction and 7 units above
+    const BACK=18, UP=7;
+    const tgtX=planeGroup.position.x - fwdX*BACK;
+    const tgtY=planeGroup.position.y + UP - planePitchAng*6; // dip with nose-down
+    const tgtZ=planeGroup.position.z - fwdZ*BACK;
+    // Smooth lerp so camera glides instead of snapping
+    camera.position.x+=(tgtX-camera.position.x)*Math.min(1,dt*7);
+    camera.position.y+=(tgtY-camera.position.y)*Math.min(1,dt*5);
+    camera.position.z+=(tgtZ-camera.position.z)*Math.min(1,dt*7);
+    // Look a fixed distance ahead along the travel heading (crosshair lines up with guns)
+    const AHEAD=35;
+    const lx=planeGroup.position.x+fwdX*AHEAD;
+    const ly=planeGroup.position.y - planePitchAng*AHEAD + 1.5;
+    const lz=planeGroup.position.z+fwdZ*AHEAD;
+    camera.lookAt(lx,ly,lz);
     return;
   }
 
@@ -4819,21 +4824,21 @@ function firePlaneCannons(){
     const og=actx.createGain(); og.gain.setValueAtTime(.5,t); og.gain.exponentialRampToValueAtTime(.001,t+.05);
     o.connect(og); og.connect(masterGain); o.start(t); o.stop(t+.05);
   }
-  // Raycaster — fire along camera/plane forward
-  const fwdDir=new THREE.Vector3(Math.sin(planeYaw+planeLookYaw),Math.sin(planeLookPitch),Math.cos(planeYaw+planeLookYaw)).normalize();
+  // Raycaster — fire along the plane's actual travel direction
+  const fwdDir=new THREE.Vector3(Math.sin(planeYaw),-Math.sin(planePitchAng),Math.cos(planeYaw)).normalize();
   const rayOrigin=new THREE.Vector3();
-  const cockOfs=new THREE.Vector3(6,0,0); cockOfs.applyQuaternion(planeGroup.quaternion);
-  rayOrigin.copy(planeGroup.position).add(cockOfs);
+  // Origin: 10 units ahead of plane along travel direction (past the nose)
+  rayOrigin.copy(planeGroup.position).addScaledVector(fwdDir,10);
   const rc=new THREE.Raycaster(rayOrigin,fwdDir,0,250);
-  // Tracer visual
+  // Tracer visual — two streams, spread perpendicular to travel
+  const rightVec=new THREE.Vector3(Math.cos(planeYaw),0,-Math.sin(planeYaw)); // perpendicular
   for(const sz of[-1,1]){
     const tracerMat=new THREE.MeshBasicMaterial({color:0xFFEE44,transparent:true,opacity:.9});
-    const tracer=new THREE.Mesh(new THREE.BoxGeometry(.06,.06,8),tracerMat);
-    tracer.position.copy(rayOrigin).add(fwdDir.clone().multiplyScalar(4));
-    tracer.position.z+=sz*1.5; // slight spread between wing-root guns
-    tracer.lookAt(rayOrigin.clone().add(fwdDir.clone().multiplyScalar(-1)));
+    const tracer=new THREE.Mesh(new THREE.BoxGeometry(.07,.07,12),tracerMat);
+    tracer.position.copy(rayOrigin).addScaledVector(fwdDir,6).addScaledVector(rightVec,sz*2);
+    tracer.lookAt(tracer.position.clone().add(fwdDir));
     scene.add(tracer);
-    sparks.push({mesh:tracer,age:0,life:0.06,vel:new THREE.Vector3(0,0,0)});
+    sparks.push({mesh:tracer,age:0,life:0.07,vel:new THREE.Vector3(0,0,0)});
   }
   // Hit detection
   const targets=[];
