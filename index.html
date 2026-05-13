@@ -482,6 +482,12 @@ let jetEngineNode   = null;      // {osc1,osc2,nSrc}
 let jetEngineGain   = null;
 let planeLookYaw    = 0;         // cockpit mouse-look offset (relative to plane heading)
 let planeLookPitch  = 0;
+let planeCrashing   = false;
+const planeCrashVel = new THREE.Vector3();
+
+// ── Bird corpse ───────────────────────────────────
+let birdCorpseGroup = null;
+let birdBloodTimer  = 0;
 
 // ── Mountain elevator ────────────────────────────
 let onElevator       = false;   // player is riding elevator
@@ -2568,7 +2574,11 @@ function interact(){
   }
   if(inPlane){
     inPlane=false; stopJetEngine();
-    P.vel.set(0,3,0); showMessage('🪂 Bailed out!',1200); playFX('jump'); return;
+    // Plane keeps its current velocity and pitches into the ground
+    planeCrashing=true;
+    planeCrashVel.set(Math.sin(planeYaw)*52, -8, Math.cos(planeYaw)*52);
+    P.vel.set(-Math.sin(planeYaw)*4, 6, -Math.cos(planeYaw)*4); // player flung backward
+    showMessage('🪂 Bailed out!',1500); playFX('jump'); return;
   }
   // Crown pickup
   if(crownPos&&!playerHasCrown&&P.pos.distanceTo(crownPos)<3){
@@ -3563,6 +3573,22 @@ function animate(){
     updateWanted(dt); updateBounty(dt); updatePowerUps(dt); updateBazookaChest(dt);
     updateVolcanoSmoke(dt);
     updateBird(dt);
+    // Blood rain from bird corpse
+    if(birdCorpseGroup){
+      birdBloodTimer-=dt;
+      if(birdBloodTimer<=0){
+        birdBloodTimer=.04+Math.random()*.05;
+        const bp=birdCorpseGroup.position;
+        for(let i=0;i<3;i++){
+          const bMesh=new THREE.Mesh(new THREE.SphereGeometry(.055+Math.random()*.055,4,3),
+            new THREE.MeshBasicMaterial({color:i%2===0?0xAA0000:0xCC0000}));
+          bMesh.position.set(bp.x+(Math.random()-.5)*16,bp.y+10+Math.random()*10,bp.z+(Math.random()-.5)*16);
+          scene.add(bMesh);
+          sparks.push({mesh:bMesh,age:0,life:1.2+Math.random()*.9,
+            vel:new THREE.Vector3((Math.random()-.5)*1.5,-6-Math.random()*7,(Math.random()-.5)*1.5)});
+        }
+      }
+    }
     updatePlane(dt);
     if(!inPlane) updateMissiles(dt); // also update any in-flight missiles after bailing
     const phud=document.getElementById('plane-hud');
@@ -4402,11 +4428,11 @@ function spawnBird(){
 }
 function killBird(){
   if(birdDead) return;
-  birdDead=true; birdDeathTimer=3.5;
+  birdDead=true; birdDeathTimer=20; // generous fall time (ground collision ends it)
   announce('🦅 BIRD SHOT DOWN!');
-  showMessage('🦅 Giant bird defeated! Bananas dropped!',2500);
+  showMessage('🦅 Giant bird defeated! Watch it fall!',2800);
   doShake(.55,1.0);
-  // Drop 4 bananas under bird
+  // Drop 4 bananas near bird's position
   if(birdGroup){
     for(let i=0;i<4;i++){
       const bx=birdGroup.position.x+(Math.random()-.5)*15;
@@ -4416,6 +4442,33 @@ function killBird(){
   }
   noise(.5,350,.9); noise(.2,1800,.5,.05); tone(45,.6,'sawtooth',1.0);
 }
+function landBirdCorpse(){
+  if(!birdGroup) return;
+  const gH=th(birdGroup.position.x,birdGroup.position.z);
+  // Settle body on terrain
+  birdGroup.position.y=gH+1.0;
+  birdGroup.rotation.set(Math.PI*.55,birdGroup.rotation.y,Math.PI/2+Math.random()*.6);
+  // Wings droop naturally
+  birdGroup.children.forEach(c=>{if(c.userData&&c.userData.sx!==undefined) c.rotation.z=c.userData.base+c.userData.sx*.95;});
+  doShake(.8,.45);
+  // Impact thud sound
+  if(actx){
+    const t=actx.currentTime;
+    const o=actx.createOscillator(); o.type='sine'; o.frequency.setValueAtTime(75,t); o.frequency.exponentialRampToValueAtTime(18,t+.7);
+    const g=actx.createGain(); g.gain.setValueAtTime(2.8,t); g.gain.exponentialRampToValueAtTime(.001,t+.8);
+    o.connect(g); g.connect(masterGain); o.start(t); o.stop(t+.8);
+  }
+  // Blood pool under body
+  const poolMat=new THREE.MeshBasicMaterial({color:0x5a0000,transparent:true,opacity:.9,side:THREE.DoubleSide});
+  const pool=new THREE.Mesh(new THREE.CircleGeometry(5+Math.random()*2.5,14),poolMat);
+  pool.rotation.x=-Math.PI/2; pool.position.set(birdGroup.position.x,gH+.04,birdGroup.position.z);
+  scene.add(pool);
+  // Detach from bird system — becomes permanent corpse
+  birdCorpseGroup=birdGroup;
+  birdGroup=null; birdActive=false; birdDead=false;
+  birdTimer=180; birdBloodTimer=0;
+  showMessage('🦅💀 The bird has fallen!',2500);
+}
 function updateBird(dt){
   if(!birdActive){
     birdTimer-=dt;
@@ -4424,10 +4477,16 @@ function updateBird(dt){
   }
   if(!birdGroup) return;
   if(birdDead){
-    birdDeathTimer-=dt;
-    birdGroup.position.y-=22*dt;
-    birdGroup.rotation.z+=dt*1.8;
-    if(birdDeathTimer<=0){scene.remove(birdGroup);birdGroup=null;birdActive=false;birdDead=false;}
+    // Plummet with tumble
+    birdGroup.position.y-=26*dt;
+    birdGroup.rotation.z+=dt*2.2;
+    birdGroup.rotation.x+=dt*0.6;
+    const gH=th(birdGroup.position.x,birdGroup.position.z);
+    if(birdGroup.position.y<=gH+1.2){
+      landBirdCorpse(); // settle on ground, start blood rain
+    }
+    birdDeathTimer-=dt; // safety fallback in case terrain calc fails
+    if(birdDeathTimer<=0){ landBirdCorpse(); }
     return;
   }
   birdSwoopTimer-=dt;
@@ -4458,6 +4517,96 @@ function updateBird(dt){
   birdGroup.children.forEach(c=>{
     if(c.userData&&c.userData.sx!==undefined) c.rotation.z=c.userData.base+c.userData.sx*flapT;
   });
+}
+
+// ────────────────────────────────────────────────
+//  PLANE CRASH
+// ────────────────────────────────────────────────
+function crashPlane(){
+  if(!planeGroup) return;
+  const pos=planeGroup.position.clone();
+  pos.y=th(pos.x,pos.z)+0.5;
+  scene.remove(planeGroup); planeGroup=null;
+
+  // ── Chain of explosions ────────────────────────
+  const boom=(ox,oy,oz,delay)=>{
+    setTimeout(()=>{
+      const ep=pos.clone().add(new THREE.Vector3(ox,oy,oz));
+      ep.y=Math.max(ep.y,th(ep.x,ep.z)+0.5);
+      rocketExplode(ep);
+    },delay);
+  };
+  boom(0,3,0,0); boom(5,1.5,3,130); boom(-4,2,-3,240);
+  boom(3,4,1,360); boom(-6,1,5,470); boom(8,2,-2,580); boom(-2,3,-6,700);
+
+  // ── Giant central fireball ─────────────────────
+  const fbMat=new THREE.MeshBasicMaterial({color:0xFF3300,transparent:true,opacity:.96});
+  const fb=new THREE.Mesh(new THREE.SphereGeometry(3,10,7),fbMat);
+  fb.position.copy(pos); fb.position.y+=4; scene.add(fb);
+  let fbA=0; const animFb=()=>{fbA+=16;const t=fbA/3500;fb.scale.setScalar(1+t*30);fbMat.opacity=Math.max(0,.96*(1-t));if(fbA<3500)setTimeout(animFb,16);else scene.remove(fb);}; setTimeout(animFb,16);
+
+  // ── Rising black smoke pillar ──────────────────
+  const smMat=new THREE.MeshBasicMaterial({color:0x0d0d0d,transparent:true,opacity:.75});
+  const sm=new THREE.Mesh(new THREE.SphereGeometry(2.5,8,6),smMat);
+  sm.position.copy(pos); sm.position.y+=6; scene.add(sm);
+  let smA=0; const animSm=()=>{smA+=16;const t=smA/9000;sm.scale.setScalar(1+t*22);sm.position.y=pos.y+6+t*45;smMat.opacity=Math.max(0,.75*(1-t));if(smA<9000)setTimeout(animSm,16);else scene.remove(sm);}; setTimeout(animSm,16);
+
+  // ── Massive flash light ────────────────────────
+  const fl=new THREE.PointLight(0xFF5500,100,220);
+  fl.position.copy(pos); fl.position.y+=6; scene.add(fl);
+  let flA=0; const animFl=()=>{flA+=16;fl.intensity=100*(1-flA/1600);if(flA<1600)setTimeout(animFl,16);else scene.remove(fl);}; setTimeout(animFl,16);
+
+  // ── Debris chunks ─────────────────────────────
+  const dMat=new THREE.MeshLambertMaterial({color:0x181818});
+  for(let i=0;i<20;i++){
+    const ox=(Math.random()-.5)*40, oz=(Math.random()-.5)*40;
+    const gx=pos.x+ox, gz=pos.z+oz;
+    const d=new THREE.Mesh(new THREE.BoxGeometry(.5+Math.random()*3,.14,.3+Math.random()*2),dMat);
+    d.position.set(gx,th(gx,gz)+.08,gz);
+    d.rotation.set(Math.random()*.6,Math.random()*Math.PI*2,Math.random()*.4);
+    d.castShadow=true; scene.add(d);
+  }
+
+  // ── Persistent fire patches ────────────────────
+  for(let i=0;i<8;i++){
+    const fx=pos.x+(Math.random()-.5)*28, fz=pos.z+(Math.random()-.5)*28;
+    const fy=th(fx,fz);
+    const fMesh=new THREE.Mesh(new THREE.SphereGeometry(.5+Math.random()*1,6,4),
+      new THREE.MeshBasicMaterial({color:0xFF4400,transparent:true,opacity:.9}));
+    fMesh.position.set(fx,fy+.5,fz); scene.add(fMesh);
+    const fL=new THREE.PointLight(0xFF6600,3+Math.random()*3,14+Math.random()*10);
+    fL.position.set(fx,fy+2,fz); scene.add(fL);
+    const flick=()=>{fMesh.scale.set(.8+Math.random()*.7,.9+Math.random()*.8,.8+Math.random()*.7);fL.intensity=2+Math.random()*5;setTimeout(flick,45+Math.random()*75);};
+    setTimeout(flick,Math.random()*600);
+  }
+
+  // ── Crash boom sound ──────────────────────────
+  if(actx){
+    const t=actx.currentTime;
+    // Deep sub-bass
+    const o1=actx.createOscillator(); o1.type='sine'; o1.frequency.setValueAtTime(52,t); o1.frequency.exponentialRampToValueAtTime(12,t+2.8);
+    const g1=actx.createGain(); g1.gain.setValueAtTime(6.0,t); g1.gain.exponentialRampToValueAtTime(.001,t+3.0);
+    o1.connect(g1); g1.connect(masterGain); o1.start(t); o1.stop(t+3.0);
+    // Boom body
+    const bsz=Math.floor(actx.sampleRate*2.8);
+    const buf=actx.createBuffer(1,bsz,actx.sampleRate);
+    const d=buf.getChannelData(0); for(let i=0;i<bsz;i++) d[i]=Math.random()*2-1;
+    const ns=actx.createBufferSource(); ns.buffer=buf;
+    const nf=actx.createBiquadFilter(); nf.type='lowpass'; nf.frequency.value=140;
+    const ng=actx.createGain(); ng.gain.setValueAtTime(7.0,t); ng.gain.exponentialRampToValueAtTime(.001,t+2.8);
+    ns.connect(nf); nf.connect(ng); ng.connect(masterGain); ns.start(t);
+    // High crack
+    const bsz2=Math.floor(actx.sampleRate*.7);
+    const buf2=actx.createBuffer(1,bsz2,actx.sampleRate);
+    const d2=buf2.getChannelData(0); for(let i=0;i<bsz2;i++) d2[i]=Math.random()*2-1;
+    const ns2=actx.createBufferSource(); ns2.buffer=buf2;
+    const nf2=actx.createBiquadFilter(); nf2.type='bandpass'; nf2.frequency.value=850; nf2.Q.value=.4;
+    const ng2=actx.createGain(); ng2.gain.setValueAtTime(4.5,t); ng2.gain.exponentialRampToValueAtTime(.001,t+.7);
+    ns2.connect(nf2); nf2.connect(ng2); ng2.connect(masterGain); ns2.start(t);
+  }
+  doShake(3.5,2.2);
+  announce('💥 F-22 DESTROYED!');
+  showMessage('🔥🔥 F-22 CRASHED AND BURNED! 🔥🔥',4000);
 }
 
 // ────────────────────────────────────────────────
@@ -4804,6 +4953,19 @@ function updateMissiles(dt){
 }
 
 function updatePlane(dt){
+  // ── Crashing ───────────────────────────────────
+  if(planeCrashing && planeGroup){
+    planeCrashVel.y -= 22*dt; // gravity
+    planeGroup.position.addScaledVector(planeCrashVel, dt);
+    planeGroup.rotation.x -= dt*1.8;  // nose pitches violently down
+    planeGroup.rotation.z += dt*1.1;  // rolling spin
+    const gH = th(planeGroup.position.x, planeGroup.position.z);
+    if(planeGroup.position.y <= gH + 1.5){
+      planeCrashing = false;
+      crashPlane();
+    }
+    return;
+  }
   if(!planeGroup) return;
   if(!inPlane){
     // Engine glow off when parked
