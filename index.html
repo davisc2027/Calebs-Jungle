@@ -2570,7 +2570,7 @@ function interact(){
     inPlane=true; planeYaw=planeGroup.rotation.y; planePitchAng=0;
     planeLookYaw=0; planeLookPitch=0; P.yaw=planeYaw; P.pitch=0;
     startJetEngine();
-    showMessage('🛩️ F-22 RAPTOR! WASD=steer & aim · LMB=cannons · SPACE=missile · E=bail',4500); playFX('jump'); return;
+    showMessage('🛩️ F-22 RAPTOR! Mouse=steer · LMB=cannons · SPACE=missile · E=bail',4500); playFX('jump'); return;
   }
   if(inPlane){
     inPlane=false; stopJetEngine();
@@ -3215,7 +3215,15 @@ function updateCamera(dt){
   const sens = P.scoped ? 0.0007 : 0.0022;
   // Only apply mouse look when on foot — eat the deltas either way to prevent drift
   if(locked){
-    if(!inPlane){P.yaw-=mouseDX*sens;P.pitch=Math.max(-.55,Math.min(1.3,P.pitch-mouseDY*sens));}
+    if(inPlane){
+      // Mouse steers the plane directly
+      const ps=0.0020;
+      planeYaw  -=mouseDX*ps;
+      planePitchAng=Math.max(-.7,Math.min(.55,planePitchAng+mouseDY*ps));
+    } else {
+      P.yaw-=mouseDX*sens;
+      P.pitch=Math.max(-.55,Math.min(1.3,P.pitch-mouseDY*sens));
+    }
     mouseDX=0; mouseDY=0;
   }
 
@@ -4977,12 +4985,7 @@ function updatePlane(dt){
     if(planeGroup.userData.engLights) planeGroup.userData.engLights.forEach(l=>l.intensity=0);
     return;
   }
-  // Controls
-  const turn=1.6;
-  if(keys['KeyA']||keys['ArrowLeft'])  planeYaw+=turn*dt;
-  if(keys['KeyD']||keys['ArrowRight']) planeYaw-=turn*dt;
-  if(keys['KeyW']||keys['ArrowUp'])    planePitchAng=Math.max(-.7,planePitchAng-.9*dt);
-  if(keys['KeyS']||keys['ArrowDown'])  planePitchAng=Math.min(.55,planePitchAng+.9*dt);
+  // Steering is mouse-only (handled in updateCamera before this runs)
   const spd=52;
   const fwd=new THREE.Vector3(Math.sin(planeYaw),-planePitchAng,Math.cos(planeYaw)).normalize();
   planeGroup.position.addScaledVector(fwd,spd*dt);
@@ -4992,9 +4995,11 @@ function updatePlane(dt){
   planeGroup.position.z=Math.max(-MAP/2+10,Math.min(MAP/2-10,planeGroup.position.z));
   planeGroup.rotation.y=planeYaw;
   planeGroup.rotation.x=planePitchAng*.6;
-  // Bank/roll visual when turning
-  const bankKey=(keys['KeyA']||keys['ArrowLeft'])?-1:(keys['KeyD']||keys['ArrowRight'])?1:0;
-  planeGroup.rotation.z+=(bankKey*0.38-planeGroup.rotation.z)*Math.min(1,dt*4);
+  // Bank/roll visual — derived from how fast yaw is changing (mouse turn rate)
+  const yawRate=(planeYaw-(planeGroup.userData.prevYaw||planeYaw))/Math.max(dt,.001);
+  planeGroup.userData.prevYaw=planeYaw;
+  const bankTarget=Math.max(-0.55,Math.min(0.55,-yawRate*0.22));
+  planeGroup.rotation.z+=(bankTarget-planeGroup.rotation.z)*Math.min(1,dt*5);
   // Player in cockpit
   const cpOfs=new THREE.Vector3(3.5,1.5,0); cpOfs.applyQuaternion(planeGroup.quaternion);
   P.pos.copy(planeGroup.position).add(cpOfs);
