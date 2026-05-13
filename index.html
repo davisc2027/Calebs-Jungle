@@ -451,6 +451,11 @@ let girlfriendGroup = null;
 // ── Cave rooms & spiders ──────────────────────────
 const spiders     = [];
 const caveChests  = [];  // {group, pos, collected}
+let   inCave      = false;
+let   caveFloorY  = 0;
+const TUNNEL_WALLS = [];  // AABB side walls — only enforced while inCave
+const caveTunnelEntryPos = new THREE.Vector3();
+const caveExitMarkerPos  = new THREE.Vector3();
 
 // ── Giant bird ────────────────────────────────────
 let birdTimer     = 180; // seconds until first bird
@@ -1564,8 +1569,11 @@ function addPlayerBloodStain(){
 //  SPIDER CLASS  (cave enemy — fast, weak, no loot)
 // ────────────────────────────────────────────────
 class Spider{
-  constructor(x,z){
-    this.pos=new THREE.Vector3(x,th(x,z),z);
+  constructor(x,z,fixedY){
+    // fixedY: pass a constant floor height for cave spiders so they don't follow terrain
+    this.fixedY=(fixedY!==undefined)?fixedY:null;
+    const iy=(this.fixedY!==null)?this.fixedY:th(x,z);
+    this.pos=new THREE.Vector3(x,iy,z);
     this.hp=45; this.maxHp=45; this.dead=false; this.deathTimer=0;
     this.state='patrol'; this.patrolTimer=0; this.attackCD=0;
     this.homeX=x; this.homeZ=z;
@@ -1623,7 +1631,13 @@ class Spider{
       const dp=new THREE.Vector3(this.patrolTarget.x-this.pos.x,0,this.patrolTarget.z-this.pos.z);
       if(dp.length()>0.5){dp.normalize(); this.pos.x+=dp.x*3.5*dt; this.pos.z+=dp.z*3.5*dt;}
     }
-    this.pos.y=th(this.pos.x,this.pos.z);
+    // Y — use fixed floor for cave spiders, terrain for surface spiders
+    if(this.fixedY!==null){
+      this.pos.y=this.fixedY;
+    } else {
+      const sh=getStairH(this.pos.x,this.pos.z,this.pos.y);
+      this.pos.y=(sh>-Infinity)?sh:th(this.pos.x,this.pos.z);
+    }
     // Leg bob animation
     this.pos.y+=Math.sin(Date.now()*.012)*0.04;
     this.group.position.copy(this.pos);
@@ -2129,6 +2143,24 @@ function resolveCollisions(){
       }
     }
   }
+  // ── Cave tunnel walls — only when player is inside the cave ──
+  if(inCave){
+    for(const w of TUNNEL_WALLS){
+      if(P.pos.x+PR > w.minX && P.pos.x-PR < w.maxX &&
+         P.pos.z+PR > w.minZ && P.pos.z-PR < w.maxZ){
+        const ox1=w.maxX-(P.pos.x-PR), ox2=(P.pos.x+PR)-w.minX;
+        const oz1=w.maxZ-(P.pos.z-PR), oz2=(P.pos.z+PR)-w.minZ;
+        const minO=Math.min(ox1,ox2,oz1,oz2);
+        if(minO===ox1){P.pos.x=w.maxX+PR;P.vel.x=Math.max(0,P.vel.x);}
+        else if(minO===ox2){P.pos.x=w.minX-PR;P.vel.x=Math.min(0,P.vel.x);}
+        else if(minO===oz1){P.pos.z=w.maxZ+PR;P.vel.z=Math.max(0,P.vel.z);}
+        else{P.pos.z=w.minZ-PR;P.vel.z=Math.min(0,P.vel.z);}
+      }
+    }
+    // Ceiling clamp so player can't jump through
+    const caveCeil=caveFloorY+4.5-1.9;
+    if(P.pos.y>caveCeil){P.pos.y=caveCeil;P.vel.y=Math.min(0,P.vel.y);}
+  }
 }
 
 // ────────────────────────────────────────────────
@@ -2456,11 +2488,19 @@ function interact(){
   }
   // Weapon shop
   if(P.pos.distanceTo(SHOP_POS)<4){ openShop(); return; }
-  // Cave teleport
-  if(P.pos.distanceTo(CAVE_POS)<4){
-    P.pos.set(CAVE_EXIT.x,CAVE_EXIT.y,CAVE_EXIT.z);
+  // Cave entry (surface → tunnels)
+  if(!inCave && P.pos.distanceTo(CAVE_POS)<4){
+    inCave=true;
+    P.pos.copy(caveTunnelEntryPos); P.vel.set(0,0,0);
+    playFX('grab');
+    showMessage('🕳️ Entered the cave tunnels… watch for spiders!',2500); return;
+  }
+  // Cave exit (tunnels → surface)
+  if(inCave && P.pos.distanceTo(caveExitMarkerPos)<3){
+    inCave=false;
+    P.pos.set(CAVE_POS.x, CAVE_POS.y+1.5, CAVE_POS.z+3);
     P.vel.set(0,0,0); playFX('grab');
-    showMessage('🕳️ SECRET TUNNEL! You\'re in the courtyard!',2500); return;
+    showMessage('☀️ Back on the surface!',1500); return;
   }
   // Bazooka chest
   if(bazookaChest&&bazookaChest.active&&P.pos.distanceTo(bazookaChest.pos)<3.5){
@@ -2675,7 +2715,8 @@ function updateInteractPrompt(){
     if(elevatorMoving!==0&&onElevator){ip.innerHTML='🏗️ Elevator moving…';ip.style.display='block';return;}
   }
   if(P.pos.distanceTo(SHOP_POS)<4){ip.innerHTML='<span class="key-hint">E</span> 🏪 Weapon Shop — $'+playerMoney;ip.style.display='block';return;}
-  if(P.pos.distanceTo(CAVE_POS)<4){ip.innerHTML='<span class="key-hint">E</span> 🕳️ Enter Secret Tunnel';ip.style.display='block';return;}
+  if(!inCave&&P.pos.distanceTo(CAVE_POS)<4){ip.innerHTML='<span class="key-hint">E</span> 🕳️ Enter Cave Tunnels';ip.style.display='block';return;}
+  if(inCave&&P.pos.distanceTo(caveExitMarkerPos)<3){ip.innerHTML='<span class="key-hint">E</span> ☀️ Exit Cave';ip.style.display='block';return;}
   for(const cc of caveChests){if(!cc.collected&&P.pos.distanceTo(cc.pos)<2.8){ip.innerHTML='<span class="key-hint">E</span> 🍌 Open cave chest';ip.style.display='block';return;}}
   if(planeGroup&&!inPlane&&P.pos.distanceTo(planeGroup.position)<8){ip.innerHTML='<span class="key-hint">E</span> ✈️ Steal the plane!';ip.style.display='block';return;}
   if(inPlane){ip.innerHTML='<span class="key-hint">E</span> ✈️ Bail out';ip.style.display='block';return;}
@@ -4082,56 +4123,182 @@ function spawnGirlfriendHeart(){
 }
 
 // ────────────────────────────────────────────────
-//  CAVE ROOMS + SPIDERS
+//  CAVE TUNNEL SYSTEM
 // ────────────────────────────────────────────────
-function buildCaveRooms(){
+function buildCaveSystem(){
   const cx=CAVE_POS.x, cz=CAVE_POS.z;
-  const rockMat=new THREE.MeshLambertMaterial({color:0x1e1e18});
-  const crystalMat=new THREE.MeshBasicMaterial({color:0x2244FF,transparent:true,opacity:.65});
-  const torchMat=new THREE.MeshLambertMaterial({color:0x6a3010});
-  // 3 chambers around cave entrance
-  const chambers=[{x:cx-16,z:cz-4},{x:cx-24,z:cz+14},{x:cx-6,z:cz+22}];
-  for(const ch of chambers){
-    const cy=th(ch.x,ch.z);
-    const cg=new THREE.Group(); cg.position.set(ch.x,cy,ch.z);
-    // Floor disc
-    const floor=new THREE.Mesh(new THREE.CylinderGeometry(6.5,7.5,.28,10),rockMat); floor.position.y=.14; cg.add(floor);
-    // Boulder walls with two gaps
-    for(let i=0;i<12;i++){
-      if(i===0||i===6) continue;
-      const a=(i/12)*Math.PI*2;
-      const wb=new THREE.Mesh(new THREE.DodecahedronGeometry(1.6+Math.random()*.7,0),rockMat);
-      wb.position.set(Math.cos(a)*6.5,1.4,Math.sin(a)*6.5);
-      wb.rotation.set(Math.random()*2,Math.random()*2,Math.random()*2); cg.add(wb);
-    }
-    // Stalactites
-    for(let i=0;i<7;i++){
-      const sx=(Math.random()-.5)*9,sz=(Math.random()-.5)*9;
-      const s=new THREE.Mesh(new THREE.ConeGeometry(.22+Math.random()*.18,1.8+Math.random(),5),rockMat);
-      s.rotation.x=Math.PI; s.position.set(sx,5,sz); cg.add(s);
-    }
-    // Glowing crystals
-    for(let i=0;i<4;i++){
-      const a=Math.random()*Math.PI*2;
-      const cr=new THREE.Mesh(new THREE.ConeGeometry(.18,.75,4),crystalMat);
-      cr.position.set(Math.cos(a)*4,.6,Math.sin(a)*4); cr.rotation.x=.25+Math.random()*.2; cg.add(cr);
-    }
-    // Torch
-    const torch=new THREE.Mesh(new THREE.CylinderGeometry(.08,.08,.7,5),torchMat);
-    torch.position.set(3.8,.9,0); cg.add(torch);
-    const tFlame=new THREE.Mesh(new THREE.SphereGeometry(.14,5,4),new THREE.MeshBasicMaterial({color:0xFF8800}));
-    tFlame.position.set(3.8,1.45,0); cg.add(tFlame);
-    const tLight=new THREE.PointLight(0xFF7700,3.5,16); tLight.position.set(3.8,1.7,0); cg.add(tLight);
-    cg.traverse(c=>{if(c.isMesh){c.castShadow=true;c.receiveShadow=true;}});
-    scene.add(cg);
-    // Banana chest
-    buildCaveChest(new THREE.Vector3(ch.x+2,cy+.6,ch.z+2));
+  const flY=th(cx,cz); caveFloorY=flY;
+  const cH=4.5; // corridor height
+  const cW=5.5; // main corridor width
+  const sW=3.4; // secret passage width (intentionally narrow)
+
+  const rockMat  =new THREE.MeshLambertMaterial({color:0x222220,side:THREE.DoubleSide});
+  const floorMat =new THREE.MeshLambertMaterial({color:0x161614});
+  const torchMat =new THREE.MeshLambertMaterial({color:0x6a3010});
+
+  // ── Helpers ──────────────────────────────────────
+  function addTorch(x,y,z,col){
+    col=col||0xFF7700;
+    const st=new THREE.Mesh(new THREE.CylinderGeometry(.08,.08,.7,5),torchMat);
+    st.position.set(x,y,z); scene.add(st);
+    const sf=new THREE.Mesh(new THREE.SphereGeometry(.14,5,4),new THREE.MeshBasicMaterial({color:0xFF8800}));
+    sf.position.set(x,y+.55,z); scene.add(sf);
+    const sl=new THREE.PointLight(col,3.5,16); sl.position.set(x,y+.8,z); scene.add(sl);
   }
-  // Spawn 5 spiders
+  function addStalactites(midX,midZ,halfW,halfL,count){
+    for(let i=0;i<count;i++){
+      const sx=midX+(Math.random()-.5)*halfW*1.7;
+      const sz=midZ+(Math.random()-.5)*halfL*1.7;
+      const sc=new THREE.Mesh(new THREE.ConeGeometry(.1+Math.random()*.12,1+Math.random()*1.4,5),rockMat);
+      sc.rotation.x=Math.PI; sc.position.set(sx,flY+cH-.15,sz); scene.add(sc);
+    }
+  }
+  // Build a corridor segment (no end walls — junctions stay open)
+  function seg(ax,az,bx,bz,w){
+    const isNS=Math.abs(bz-az)>=Math.abs(bx-ax);
+    const mx=(ax+bx)/2, mz=(az+bz)/2;
+    const lenX=Math.abs(bx-ax)||0.001, lenZ=Math.abs(bz-az)||0.001;
+    const boxW=isNS?w:lenX, boxL=isNS?lenZ:w;
+    // Floor
+    const fl=new THREE.Mesh(new THREE.BoxGeometry(boxW+.3,0.5,boxL+.3),floorMat);
+    fl.position.set(mx,flY-.25,mz); fl.receiveShadow=true; scene.add(fl);
+    // Ceiling
+    const cl=new THREE.Mesh(new THREE.BoxGeometry(boxW+.5,0.5,boxL+.5),rockMat);
+    cl.position.set(mx,flY+cH+.25,mz); scene.add(cl);
+    // Side walls + TUNNEL_WALLS
+    if(isNS){
+      const wL=new THREE.Mesh(new THREE.BoxGeometry(0.6,cH,lenZ+.6),rockMat);
+      wL.position.set(mx-w/2,flY+cH/2,mz); scene.add(wL);
+      const wR=new THREE.Mesh(new THREE.BoxGeometry(0.6,cH,lenZ+.6),rockMat);
+      wR.position.set(mx+w/2,flY+cH/2,mz); scene.add(wR);
+      TUNNEL_WALLS.push({minX:mx-w/2-.55,maxX:mx-w/2+.05,minZ:Math.min(az,bz)-.3,maxZ:Math.max(az,bz)+.3});
+      TUNNEL_WALLS.push({minX:mx+w/2-.05,maxX:mx+w/2+.55,minZ:Math.min(az,bz)-.3,maxZ:Math.max(az,bz)+.3});
+    } else {
+      const wN=new THREE.Mesh(new THREE.BoxGeometry(lenX+.6,cH,0.6),rockMat);
+      wN.position.set(mx,flY+cH/2,mz-w/2); scene.add(wN);
+      const wS=new THREE.Mesh(new THREE.BoxGeometry(lenX+.6,cH,0.6),rockMat);
+      wS.position.set(mx,flY+cH/2,mz+w/2); scene.add(wS);
+      TUNNEL_WALLS.push({minX:Math.min(ax,bx)-.3,maxX:Math.max(ax,bx)+.3,minZ:mz-w/2-.55,maxZ:mz-w/2+.05});
+      TUNNEL_WALLS.push({minX:Math.min(ax,bx)-.3,maxX:Math.max(ax,bx)+.3,minZ:mz+w/2-.05,maxZ:mz+w/2+.55});
+    }
+    // STAIR_ZONE
+    if(isNS) STAIR_ZONES.push({minX:mx-w/2,maxX:mx+w/2,minZ:Math.min(az,bz),maxZ:Math.max(az,bz),axis:'flat',h0:flY,noAutoLift:true});
+    else     STAIR_ZONES.push({minX:Math.min(ax,bx),maxX:Math.max(ax,bx),minZ:mz-w/2,maxZ:mz+w/2,axis:'flat',h0:flY,noAutoLift:true});
+  }
+  // Build a closed room (4 walls)
+  function mkRoom(rcx,rcz,rW,rL){
+    const fl=new THREE.Mesh(new THREE.BoxGeometry(rW,0.5,rL),floorMat);
+    fl.position.set(rcx,flY-.25,rcz); fl.receiveShadow=true; scene.add(fl);
+    const cl=new THREE.Mesh(new THREE.BoxGeometry(rW+.5,0.5,rL+.5),rockMat);
+    cl.position.set(rcx,flY+cH+.25,rcz); scene.add(cl);
+    const wallDefs=[
+      [rW+.6,cH,0.6,rcx,flY+cH/2,rcz-rL/2],
+      [rW+.6,cH,0.6,rcx,flY+cH/2,rcz+rL/2],
+      [0.6,cH,rL+.6,rcx-rW/2,flY+cH/2,rcz],
+      [0.6,cH,rL+.6,rcx+rW/2,flY+cH/2,rcz],
+    ];
+    wallDefs.forEach(([bx,by,bz,px,py,pz])=>{
+      const m=new THREE.Mesh(new THREE.BoxGeometry(bx,by,bz),rockMat);
+      m.position.set(px,py,pz); scene.add(m);
+    });
+    TUNNEL_WALLS.push({minX:rcx-rW/2-.5,maxX:rcx-rW/2+.05,minZ:rcz-rL/2,maxZ:rcz+rL/2}); // west
+    TUNNEL_WALLS.push({minX:rcx+rW/2-.05,maxX:rcx+rW/2+.5,minZ:rcz-rL/2,maxZ:rcz+rL/2}); // east
+    TUNNEL_WALLS.push({minX:rcx-rW/2,maxX:rcx+rW/2,minZ:rcz-rL/2-.5,maxZ:rcz-rL/2+.05}); // north
+    TUNNEL_WALLS.push({minX:rcx-rW/2,maxX:rcx+rW/2,minZ:rcz+rL/2-.05,maxZ:rcz+rL/2+.5}); // south
+    STAIR_ZONES.push({minX:rcx-rW/2,maxX:rcx+rW/2,minZ:rcz-rL/2,maxZ:rcz+rL/2,axis:'flat',h0:flY,noAutoLift:true});
+  }
+
+  // ── Layout ──────────────────────────────────────
+  // Main N-S corridor: from entrance (cz) northward (cz-36)
+  seg(cx, cz, cx, cz-36, cW);
+  // West branch at z=cz-16 → spider den
+  seg(cx, cz-16, cx-24, cz-16, cW);
+  // Spider den room
+  const denX=cx-30, denZ=cz-16;
+  mkRoom(denX, denZ, 12, 10);
+  // Secret passage (east, narrow) — starts partway along the east wall, hard to spot
+  // Junction gap: the east wall of the main corridor is open from z=cz-35 to z=cz-32
+  // (achieved by building the east side wall in two pieces via the seg() call above—
+  //  the junction is simply left in the tunnel_walls gap zone)
+  seg(cx, cz-34, cx+18, cz-34, sW);   // east passage
+  seg(cx+18, cz-34, cx+18, cz-50, sW); // north bend
+  // Hidden room — extra secret, green crystals
+  const secX=cx+18, secZ=cz-57;
+  mkRoom(secX, secZ, 12, 10);
+
+  // ── Stalactites ──
+  addStalactites(cx, cz-18, cW/2, 18, 14); // main corridor
+  addStalactites(denX, denZ, 6, 5, 10);     // den
+  addStalactites(secX, secZ, 6, 5, 8);      // secret room
+
+  // ── Blue crystals in main corridor ──
+  const cryMat=new THREE.MeshBasicMaterial({color:0x2244FF,transparent:true,opacity:.65});
+  for(let i=0;i<8;i++){
+    const sx=cx+(Math.random()-.5)*4.5, sz=cz-3-Math.random()*33;
+    const cr=new THREE.Mesh(new THREE.ConeGeometry(.18,.75,4),cryMat);
+    cr.position.set(sx,flY+.4,sz); cr.rotation.x=.25+Math.random()*.2; scene.add(cr);
+    const crL=new THREE.PointLight(0x2244FF,1.2,8); crL.position.set(sx,flY+.9,sz); scene.add(crL);
+  }
+
+  // ── Torches along main corridor ──
+  addTorch(cx-2,flY+1.4,cz-10);
+  addTorch(cx+2,flY+1.4,cz-22);
+  addTorch(cx-2,flY+1.4,cz-32);
+  // Den torch
+  addTorch(denX,flY+1.4,denZ);
+  // Secret room green torch
+  addTorch(secX-3,flY+1.4,secZ,0x007700);
+  addTorch(secX+3,flY+1.4,secZ,0x007700);
+  const gl=new THREE.PointLight(0x00AA44,3,22); gl.position.set(secX,flY+3,secZ); scene.add(gl);
+
+  // ── Den: spider webs ──
+  const webMat=new THREE.MeshBasicMaterial({color:0xcccccc,transparent:true,opacity:.38,side:THREE.DoubleSide});
+  for(const [wo,wz] of [[-4,-3],[4,-3],[-4,3],[4,3]]){
+    const web=new THREE.Mesh(new THREE.CircleGeometry(1.3+Math.random()*.5,8),webMat);
+    web.rotation.y=Math.random()*Math.PI; web.rotation.x=Math.PI/2+(Math.random()-.5)*.4;
+    web.position.set(denX+wo,flY+2.5,denZ+wz); scene.add(web);
+  }
+
+  // ── Boulder cluster at secret junction to hide it ──
+  const boulMat=new THREE.MeshLambertMaterial({color:0x252520});
   for(let i=0;i<5;i++){
-    const a=Math.random()*Math.PI*2, r=8+Math.random()*22;
-    spiders.push(new Spider(cx+Math.cos(a)*r, cz+Math.sin(a)*r));
+    const a=(i/5)*Math.PI*2;
+    const bl=new THREE.Mesh(new THREE.DodecahedronGeometry(.55+Math.random()*.35,0),boulMat);
+    bl.position.set(cx+.9+Math.cos(a)*.7,flY+.5,cz-34+Math.sin(a)*.7);
+    bl.rotation.set(Math.random()*2,Math.random()*2,Math.random()*2); scene.add(bl);
   }
+
+  // ── Green crystals in secret room only ──
+  const gcMat=new THREE.MeshBasicMaterial({color:0x00FF55,transparent:true,opacity:.7});
+  for(let i=0;i<6;i++){
+    const a=(i/6)*Math.PI*2;
+    const gc=new THREE.Mesh(new THREE.ConeGeometry(.2,.9,4),gcMat);
+    gc.position.set(secX+Math.cos(a)*4,flY+.5,secZ+Math.sin(a)*4);
+    gc.rotation.x=.3+Math.random()*.3; scene.add(gc);
+  }
+
+  // ── 2 chests in hidden room only ──
+  buildCaveChest(new THREE.Vector3(secX-3,flY+.6,secZ-2));
+  buildCaveChest(new THREE.Vector3(secX+3,flY+.6,secZ+2));
+
+  // ── Spiders: 4 in den, 2 in main corridor ──
+  spiders.push(new Spider(denX-3,denZ-2,flY));
+  spiders.push(new Spider(denX+3,denZ+2,flY));
+  spiders.push(new Spider(denX-2,denZ+3,flY));
+  spiders.push(new Spider(denX+3,denZ-3,flY));
+  spiders.push(new Spider(cx,cz-12,flY));
+  spiders.push(new Spider(cx,cz-26,flY));
+
+  // ── Entry / exit markers ──
+  caveTunnelEntryPos.set(cx, flY+.6, cz-3);
+  caveExitMarkerPos.set(cx, flY+.6, cz-2);
+
+  // ── Exit ring (glowing so player can find it) ──
+  const exitMat=new THREE.MeshBasicMaterial({color:0x00FFAA,transparent:true,opacity:.75,side:THREE.DoubleSide});
+  const exitRing=new THREE.Mesh(new THREE.TorusGeometry(1.2,.12,6,24),exitMat);
+  exitRing.rotation.x=Math.PI/2; exitRing.position.set(cx,flY+.3,cz-2); scene.add(exitRing);
+  const exitL=new THREE.PointLight(0x00FFAA,2.5,10); exitL.position.set(cx,flY+1,cz-2); scene.add(exitL);
+  (function spinExit(){ requestAnimationFrame(spinExit); exitRing.rotation.z+=.015; })();
 }
 function buildCaveChest(pos){
   const wm=new THREE.MeshLambertMaterial({color:0x3a2010});
@@ -5220,7 +5387,7 @@ function updateFootsteps(dt){
 // ────────────────────────────────────────────────
 function init(){
   initThree(); buildTerrain(); buildPond(); buildCastle(); buildStairs(); buildStash(); buildRocks(); plantForest();
-  buildHomeBase(); buildGirlfriend(); buildBarrels(); buildCrates(); buildMonkeyVillage(); buildCave(); buildCaveRooms(); buildMountain(); buildZiplines(); buildPlane();
+  buildHomeBase(); buildGirlfriend(); buildBarrels(); buildCrates(); buildMonkeyVillage(); buildCave(); buildCaveSystem(); buildMountain(); buildZiplines(); buildPlane();
   buildFort(-60,-56); buildFort(56,-70); buildFort(-76,56); buildFort(90,30);
   buildPlayer(); placeBananas(); spawnMonkeys(); placeAmmoPickups();
   // Set mountain perch chest spot y now that STAIR_ZONES are registered
