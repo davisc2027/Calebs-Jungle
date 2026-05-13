@@ -1635,7 +1635,7 @@ class Spider{
       const dir=P.pos.clone().sub(this.pos); dir.y=0; dir.normalize();
       this.pos.x+=dir.x*9*dt; this.pos.z+=dir.z*9*dt;
       this.group.rotation.y=Math.atan2(dir.x,dir.z);
-      if(d<2.0&&this.attackCD<=0){dealDamage(12); this.attackCD=1.8; doShake(.05,.1);}
+      if(d<2.0&&this.attackCD<=0){dealDamage(1); this.attackCD=1.8; doShake(.02,.08);}
     } else {
       this.patrolTimer-=dt;
       if(this.patrolTimer<=0){
@@ -2170,6 +2170,18 @@ function resolveCollisions(){
           if(dot<0){P.vel.x-=dot*nx; P.vel.z-=dot*nz;}
         }
       }
+    }
+  }
+  // Spider bodies — push player out so they can't walk through / get stuck on top
+  for(const sp of spiders){
+    if(sp.dead) continue;
+    const dx=P.pos.x-sp.pos.x, dz=P.pos.z-sp.pos.z;
+    const d2=dx*dx+dz*dz, need=0.65+PR;
+    if(d2<need*need&&d2>0.001){
+      const d=Math.sqrt(d2), push=(need-d)/d;
+      P.pos.x+=dx*push; P.pos.z+=dz*push;
+      const nx=dx/d,nz=dz/d,dot=P.vel.x*nx+P.vel.z*nz;
+      if(dot<0){P.vel.x-=dot*nx;P.vel.z-=dot*nz;}
     }
   }
   // ── Cave tunnel walls — only when player is inside the cave ──
@@ -3239,7 +3251,7 @@ function updateCamera(dt){
       planePitchAng=Math.max(-.7,Math.min(.55,planePitchAng+mouseDY*ps));
     } else {
       P.yaw-=mouseDX*sens;
-      P.pitch=Math.max(-.55,Math.min(1.3,P.pitch-mouseDY*sens));
+      P.pitch=Math.max(-.55,Math.min(1.55,P.pitch-mouseDY*sens));
     }
     mouseDX=0; mouseDY=0;
   }
@@ -4336,15 +4348,31 @@ function buildCaveSystem(){
     const crL=new THREE.PointLight(0x2244FF,1.2,8); crL.position.set(sx,flY+.9,sz); scene.add(crL);
   }
 
-  // ── Torches along main corridor ──
-  addTorch(cx-2,flY+1.4,cz-10);
-  addTorch(cx+2,flY+1.4,cz-22);
-  addTorch(cx-2,flY+1.4,cz-32);
-  // Den torch
-  addTorch(denX,flY+1.4,denZ);
-  // Secret room green torch
-  addTorch(secX-3,flY+1.4,secZ,0x007700);
-  addTorch(secX+3,flY+1.4,secZ,0x007700);
+  // ── Torches — dense placement so every passage is well lit ──
+  // Main N-S corridor (every ~6 units)
+  for(let tz=cz-5;tz>=cz-35;tz-=6){
+    const side=(Math.round((cz-tz)/6)%2===0)?-2:2;
+    addTorch(cx+side,flY+1.4,tz);
+  }
+  // West branch to den
+  for(let tx=cx-6;tx>=cx-24;tx-=6){
+    const side=(Math.round((cx-tx)/6)%2===0)?0:-0;
+    addTorch(tx,flY+1.4,cz-16);
+  }
+  // East secret passage horizontal
+  for(let tx=cx+4;tx<=cx+17;tx+=6) addTorch(tx,flY+1.4,cz-34);
+  // Secret passage vertical bend
+  for(let tz=cz-39;tz>=cz-49;tz-=6) addTorch(cx+18,flY+1.4,tz);
+  // Den torches (4 corners)
+  addTorch(denX-4,flY+1.4,denZ-3);
+  addTorch(denX+4,flY+1.4,denZ-3);
+  addTorch(denX-4,flY+1.4,denZ+3);
+  addTorch(denX+4,flY+1.4,denZ+3);
+  // Secret room green torches (4 corners)
+  addTorch(secX-4,flY+1.4,secZ-3,0x007700);
+  addTorch(secX+4,flY+1.4,secZ-3,0x007700);
+  addTorch(secX-4,flY+1.4,secZ+3,0x007700);
+  addTorch(secX+4,flY+1.4,secZ+3,0x007700);
   const gl=new THREE.PointLight(0x00AA44,3,22); gl.position.set(secX,flY+3,secZ); scene.add(gl);
 
   // ── Den: spider webs ──
@@ -5063,7 +5091,7 @@ function updatePlane(dt){
     return;
   }
   // Steering is mouse-only (handled in updateCamera before this runs)
-  const spd=52;
+  const spd=26;
   const fwd=new THREE.Vector3(Math.sin(planeYaw),-planePitchAng,Math.cos(planeYaw)).normalize();
   planeGroup.position.addScaledVector(fwd,spd*dt);
   const minY=th(planeGroup.position.x,planeGroup.position.z)+5;
