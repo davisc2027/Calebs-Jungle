@@ -455,6 +455,7 @@ const caveChests  = [];  // {group, pos, collected}
 let   inCave      = false;
 let   caveFloorY  = 0;
 const TUNNEL_WALLS = [];  // AABB side walls — only enforced while inCave
+const HUT_WALLS    = [];  // AABB walls for cabin — always enforced
 const caveTunnelEntryPos = new THREE.Vector3();
 const caveExitMarkerPos  = new THREE.Vector3();
 
@@ -2089,6 +2090,20 @@ function spawnAmmo(pos){
 // ────────────────────────────────────────────────
 const PR = 0.5; // player radius
 function resolveCollisions(){
+  // Hut AABB walls — same hardness as castle walls
+  for(const w of HUT_WALLS){
+    if(w.maxH !== undefined && P.pos.y >= w.maxH) continue;
+    if(P.pos.x+PR > w.minX && P.pos.x-PR < w.maxX &&
+       P.pos.z+PR > w.minZ && P.pos.z-PR < w.maxZ){
+      const ox1=w.maxX-(P.pos.x-PR), ox2=(P.pos.x+PR)-w.minX;
+      const oz1=w.maxZ-(P.pos.z-PR), oz2=(P.pos.z+PR)-w.minZ;
+      const minO=Math.min(ox1,ox2,oz1,oz2);
+      if(minO===ox1){P.pos.x=w.maxX+PR;P.vel.x=Math.max(0,P.vel.x);}
+      else if(minO===ox2){P.pos.x=w.minX-PR;P.vel.x=Math.min(0,P.vel.x);}
+      else if(minO===oz1){P.pos.z=w.maxZ+PR;P.vel.z=Math.max(0,P.vel.z);}
+      else{P.pos.z=w.minZ-PR;P.vel.z=Math.min(0,P.vel.z);}
+    }
+  }
   // Castle AABB walls (outer + keep)
   // maxH: skip collision when player is standing ON TOP of the wall
   for(const w of [...CASTLE_WALLS,...KEEP_WALLS]){
@@ -3115,8 +3130,10 @@ function updatePlayer(dt){
   P.pos.y += P.vel.y * dt;
   P.pos.z += P.vel.z * dt;
 
-  // Ground collision — terrain OR stair/wall-top platform, whichever is higher
-  const ty = Math.max(th(P.pos.x, P.pos.z), getStairH(P.pos.x, P.pos.z, P.pos.y));
+  // Ground collision — underground floor when in cave, else terrain or stair top
+  const ty = inCave
+    ? caveFloorY
+    : Math.max(th(P.pos.x, P.pos.z), getStairH(P.pos.x, P.pos.z, P.pos.y));
   if(P.pos.y <= ty) {
     const wasAirborne = !P.onGround;
     const impactSpeed = -P.vel.y;
@@ -4206,7 +4223,7 @@ function spawnGirlfriendHeart(){
 // ────────────────────────────────────────────────
 function buildCaveSystem(){
   const cx=CAVE_POS.x, cz=CAVE_POS.z;
-  const flY=th(cx,cz); caveFloorY=flY;
+  const flY=th(cx,cz)-8; caveFloorY=flY; // 8 units underground
   const cH=4.5; // corridor height
   const cW=5.5; // main corridor width
   const sW=3.4; // secret passage width (intentionally narrow)
@@ -4751,6 +4768,15 @@ function buildPlane(){
   star.rotation.x=-Math.PI/2; star.rotation.z=Math.PI/4;
   star.position.set(0,-0.46,-4.5); g.add(star);
 
+  // ── Align model: nose (local +X) → travel direction (outer local +Z) ──
+  // Wrap all meshes/lights in an inner group rotated -90° around Y so the
+  // fuselage nose points the same way the plane moves.
+  {
+    const inner=new THREE.Group(); inner.rotation.y=-Math.PI/2;
+    while(g.children.length>0) inner.add(g.children[0]);
+    g.add(inner);
+  }
+
   // ── Position & register ───────────────────────────────
   const py=th(PLANE_SPAWN.x,PLANE_SPAWN.z)+2.3;
   PLANE_SPAWN.y=py;
@@ -4965,6 +4991,57 @@ function updateMissiles(dt){
   }
 }
 
+// Returns true and triggers a crash if the plane is inside solid geometry.
+function checkPlaneCollision(){
+  if(!planeGroup || planeCrashing) return false;
+  const px=planeGroup.position.x, py=planeGroup.position.y, pz=planeGroup.position.z;
+  const PR_PLANE=3.5; // rough half-wingspan collision radius
+
+  // Castle + keep AABB walls
+  for(const w of [...CASTLE_WALLS,...KEEP_WALLS]){
+    if(px+PR_PLANE>w.minX && px-PR_PLANE<w.maxX &&
+       pz+PR_PLANE>w.minZ && pz-PR_PLANE<w.maxZ){
+      // Check height — walls have a maxH
+      const top = w.maxH !== undefined ? w.maxH : 999;
+      if(py < top + PR_PLANE){
+        // Bail player out then crash the plane
+        inPlane=false;
+        P.pos.set(px,py+4,pz);
+        P.vel.set(0,5,0);
+        const vel=new THREE.Vector3(Math.sin(planeYaw),0.4,Math.cos(planeYaw));
+        vel.normalize().multiplyScalar(18);
+        planeCrashVel.copy(vel);
+        planeCrashing=true;
+        if(jetEngineGain) jetEngineGain.gain.setTargetAtTime(0,actx.currentTime,0.3);
+        announce('💥 PLANE HIT A WALL!');
+        return true;
+      }
+    }
+  }
+  // Mountain cone
+  if(MPEAK_Y>0){
+    const MTN_BASE_R=42, MTN_PEAK=54;
+    const relH=py-MOUNTAIN_POS.y;
+    if(relH<MTN_PEAK && relH>-2){
+      const coneR=Math.max(0,MTN_BASE_R*(1-relH/MTN_PEAK));
+      const dx=px-MOUNTAIN_POS.x, dz=pz-MOUNTAIN_POS.z;
+      if(dx*dx+dz*dz < (coneR+PR_PLANE)*(coneR+PR_PLANE)){
+        inPlane=false;
+        P.pos.set(px,py+4,pz);
+        P.vel.set(0,5,0);
+        const vel=new THREE.Vector3(Math.sin(planeYaw),0.4,Math.cos(planeYaw));
+        vel.normalize().multiplyScalar(18);
+        planeCrashVel.copy(vel);
+        planeCrashing=true;
+        if(jetEngineGain) jetEngineGain.gain.setTargetAtTime(0,actx.currentTime,0.3);
+        announce('💥 PLANE HIT THE MOUNTAIN!');
+        return true;
+      }
+    }
+  }
+  return false;
+}
+
 function updatePlane(dt){
   // ── Crashing ───────────────────────────────────
   if(planeCrashing && planeGroup){
@@ -4993,6 +5070,7 @@ function updatePlane(dt){
   planeGroup.position.y=Math.max(minY,Math.min(95,planeGroup.position.y));
   planeGroup.position.x=Math.max(-MAP/2+10,Math.min(MAP/2-10,planeGroup.position.x));
   planeGroup.position.z=Math.max(-MAP/2+10,Math.min(MAP/2-10,planeGroup.position.z));
+  if(checkPlaneCollision()) return; // plane crashed into geometry
   planeGroup.rotation.y=planeYaw;
   planeGroup.rotation.x=planePitchAng*.6;
   // Bank/roll visual — derived from how fast yaw is changing (mouse turn rate)
@@ -5042,6 +5120,13 @@ function buildHomeBase(){
   // Front wall — two halves with doorway gap (x: -1.1 to 1.1 = 2.2 wide door)
   const wallFL=new THREE.Mesh(new THREE.BoxGeometry(2.4,3.5,0.3),logMat); wallFL.position.set(-2.3,1.75,2.85); cg.add(wallFL);
   const wallFR=wallFL.clone(); wallFR.position.x=2.3; cg.add(wallFR);
+  // ── Hut collision walls (world-space AABBs, castle-wall hardness) ──
+  const hwMaxH=hy+3.5;
+  HUT_WALLS.push({minX:hx-3.5,maxX:hx-3.2,minZ:hz-3,maxZ:hz+3,maxH:hwMaxH});        // left wall
+  HUT_WALLS.push({minX:hx+3.2,maxX:hx+3.5,minZ:hz-3,maxZ:hz+3,maxH:hwMaxH});        // right wall
+  HUT_WALLS.push({minX:hx-3.5,maxX:hx+3.5,minZ:hz-3.0,maxZ:hz-2.7,maxH:hwMaxH});   // back wall
+  HUT_WALLS.push({minX:hx-3.5,maxX:hx-1.1,minZ:hz+2.7,maxZ:hz+3.0,maxH:hwMaxH});   // front-left (no door gap)
+  HUT_WALLS.push({minX:hx+1.1,maxX:hx+3.5,minZ:hz+2.7,maxZ:hz+3.0,maxH:hwMaxH});   // front-right (no door gap)
   // Door lintel
   const lintel=new THREE.Mesh(new THREE.BoxGeometry(2.4,0.9,0.3),logMat); lintel.position.set(0,3.05,2.85); cg.add(lintel);
   // Window
