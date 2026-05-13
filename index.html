@@ -156,6 +156,8 @@ canvas#c{display:block;position:fixed;top:0;left:0;width:100%;height:100%}
 #granny-rip-text{font-size:68px;font-weight:900;color:#FF0000;text-shadow:0 0 40px #880000,0 4px 8px #000;letter-spacing:4px;line-height:1.15;animation:grannySway 1.5s ease-in-out infinite}
 #granny-rip-sub{font-size:28px;color:#FF8888;font-weight:700;text-shadow:0 0 16px #880000}
 @keyframes grannySway{0%,100%{transform:scale(1) rotate(-1deg)}50%{transform:scale(1.06) rotate(1deg)}}
+@keyframes heartPop{0%{opacity:0;transform:translate(-50%,0) scale(.4)}25%{opacity:1;transform:translate(-50%,-28px) scale(1.3)}75%{opacity:.9;transform:translate(-50%,-65px) scale(1.0)}100%{opacity:0;transform:translate(-50%,-95px) scale(.8)}}
+.gf-heart{position:fixed;pointer-events:none;z-index:60;font-size:38px;animation:heartPop 1.6s ease-out forwards}
 </style>
 </head>
 <body>
@@ -233,7 +235,7 @@ canvas#c{display:block;position:fixed;top:0;left:0;width:100%;height:100%}
   <div id="minimap"><canvas id="mm-canvas" width="162" height="162"></canvas><div id="mm-label">JUNGLE MAP</div></div>
   <div id="kill-feed"></div>
   <div id="objective">🎯 Steal 15 bananas from the Monkey Castle!</div>
-  <div id="stash-bar">📦 Bananas stashed: 0 / 15</div>
+  <div id="stash-bar">📦 Bananas stashed: 0 / 30</div>
   <div id="interact-prompt"></div>
   <div id="game-message"></div>
   <div id="announce"></div>
@@ -289,7 +291,7 @@ const WEAPONS = [
   {name:'PISTOL', emoji:'🔫', mag:15, reserve:45, dmg:35, headMult:2.5, rate:0.32, reloadDur:1.2, auto:false, melee:false},
   {name:'RIFLE',  emoji:'⚙️', mag:30, reserve:90, dmg:25, headMult:2.0, rate:0.12, reloadDur:1.8, auto:true,  melee:false},
   {name:'SNIPER', emoji:'🎯', mag:5,  reserve:15, dmg:90, headMult:3.0, rate:0.85, reloadDur:2.5, auto:false, melee:false},
-  {name:'KNIFE',  emoji:'🗡️', mag:1,  reserve:1,  dmg:75, headMult:1.0, rate:0.45, reloadDur:0,   auto:false, melee:true},
+  {name:'KNIFE',  emoji:'🗡️', mag:1,  reserve:1,  dmg:19, headMult:1.0, rate:0.45, reloadDur:0,   auto:false, melee:true},
   {name:'BAZOOKA',emoji:'🚀', mag:1,  reserve:0,  dmg:180,headMult:1.0, rate:1.8,  reloadDur:0,   auto:false, melee:false, rocket:true},
 ];
 
@@ -442,6 +444,31 @@ let volcanoSmokePause = 0;
 // ── Granny boss ───────────────────────────────────
 let grannyMonkey = null;
 let grannySpawned = false;
+
+// ── Girlfriend ────────────────────────────────────
+let girlfriendGroup = null;
+
+// ── Cave rooms & spiders ──────────────────────────
+const spiders     = [];
+const caveChests  = [];  // {group, pos, collected}
+
+// ── Giant bird ────────────────────────────────────
+let birdTimer     = 180; // seconds until first bird
+let birdGroup     = null;
+let birdHP        = 0;
+const BIRD_MAX_HP = 450;
+let birdActive    = false;
+let birdAngle     = 0;
+let birdSwoopTimer= 18;
+let birdDead      = false;
+let birdDeathTimer= 0;
+
+// ── Plane ─────────────────────────────────────────
+const PLANE_SPAWN = new THREE.Vector3(190, 0, 0);
+let planeGroup    = null;
+let inPlane       = false;
+let planeYaw      = Math.PI;   // face inward by default
+let planePitchAng = 0;
 
 // ── Mountain elevator ────────────────────────────
 let onElevator       = false;   // player is riding elevator
@@ -1534,6 +1561,90 @@ function addPlayerBloodStain(){
 }
 
 // ────────────────────────────────────────────────
+//  SPIDER CLASS  (cave enemy — fast, weak, no loot)
+// ────────────────────────────────────────────────
+class Spider{
+  constructor(x,z){
+    this.pos=new THREE.Vector3(x,th(x,z),z);
+    this.hp=45; this.maxHp=45; this.dead=false; this.deathTimer=0;
+    this.state='patrol'; this.patrolTimer=0; this.attackCD=0;
+    this.homeX=x; this.homeZ=z;
+    this.patrolTarget=new THREE.Vector3(x,0,z);
+    this._buildMesh();
+  }
+  _buildMesh(){
+    const g=new THREE.Group();
+    const bMat=new THREE.MeshLambertMaterial({color:0x111111});
+    const eMat=new THREE.MeshBasicMaterial({color:0xFF2200});
+    // Abdomen
+    const abd=new THREE.Mesh(new THREE.SphereGeometry(.38,7,5),bMat); abd.position.z=-.3; abd.position.y=.38; g.add(abd);
+    // Cephalothorax (head+thorax)
+    const ceph=new THREE.Mesh(new THREE.SphereGeometry(.28,6,4),bMat); ceph.position.set(0,.36,.22); g.add(ceph);
+    // 4 pairs of eyes
+    for(const [ex,ez] of [[-.1,.5],[.1,.5],[-.18,.43],[.18,.43]]){
+      const eye=new THREE.Mesh(new THREE.SphereGeometry(.055,4,3),eMat); eye.position.set(ex,.42,ez); g.add(eye);
+    }
+    // 8 legs
+    const lMat=new THREE.MeshLambertMaterial({color:0x0d0d0d});
+    for(let i=0;i<8;i++){
+      const side=i<4?-1:1, li=i%4;
+      const a=(li/4)*Math.PI*0.9-Math.PI*0.1;
+      const leg=new THREE.Mesh(new THREE.CylinderGeometry(.035,.025,.6,4),lMat);
+      leg.position.set(side*.28,.28,(li-1.5)*.18);
+      leg.rotation.z=side*(Math.PI/2-a*.4); leg.rotation.x=-.3;
+      g.add(leg);
+    }
+    g.traverse(c=>{if(c.isMesh){c.userData.spider=this; c.castShadow=true;}});
+    g.position.copy(this.pos);
+    this.group=g; scene.add(g);
+  }
+  update(dt){
+    if(this.dead){
+      this.deathTimer-=dt;
+      if(this.deathTimer<=0){scene.remove(this.group); spiders.splice(spiders.indexOf(this),1);}
+      return;
+    }
+    this.attackCD=Math.max(0,this.attackCD-dt);
+    const d=P.pos.distanceTo(this.pos);
+    if(d<20) this.state='chase';
+    else if(d>32) this.state='patrol';
+    if(this.state==='chase'){
+      const dir=P.pos.clone().sub(this.pos); dir.y=0; dir.normalize();
+      this.pos.x+=dir.x*9*dt; this.pos.z+=dir.z*9*dt;
+      this.group.rotation.y=Math.atan2(dir.x,dir.z);
+      if(d<2.0&&this.attackCD<=0){dealDamage(12); this.attackCD=1.8; doShake(.05,.1);}
+    } else {
+      this.patrolTimer-=dt;
+      if(this.patrolTimer<=0){
+        this.patrolTimer=2+Math.random()*3;
+        const a=Math.random()*Math.PI*2, r=Math.random()*10;
+        this.patrolTarget.set(this.homeX+Math.cos(a)*r,0,this.homeZ+Math.sin(a)*r);
+      }
+      const dp=new THREE.Vector3(this.patrolTarget.x-this.pos.x,0,this.patrolTarget.z-this.pos.z);
+      if(dp.length()>0.5){dp.normalize(); this.pos.x+=dp.x*3.5*dt; this.pos.z+=dp.z*3.5*dt;}
+    }
+    this.pos.y=th(this.pos.x,this.pos.z);
+    // Leg bob animation
+    this.pos.y+=Math.sin(Date.now()*.012)*0.04;
+    this.group.position.copy(this.pos);
+  }
+  takeDamage(amount){
+    if(this.dead) return;
+    this.hp-=amount; showHitMarker();
+    if(this.hp<=0) this.die();
+    else this.state='chase';
+  }
+  die(){
+    if(this.dead) return;
+    this.dead=true; this.deathTimer=4;
+    kills++; playFX('monkeyDie');
+    this.group.rotation.z=Math.PI/2;
+    this.group.position.y-=.2;
+    showMessage('🕷️ Spider down!',600);
+  }
+}
+
+// ────────────────────────────────────────────────
 //  MONKEY WALL COLLISION
 // ────────────────────────────────────────────────
 const MR = 0.5; // monkey collision radius
@@ -2060,6 +2171,11 @@ function updateElevator(dt){
     elevatorDoorOpen = distToDoor < 7;
     const targetAng = elevatorDoorOpen ? Math.PI*0.5 : 0;
     elevatorDoorMesh.rotation.y += (targetAng - elevatorDoorMesh.rotation.y) * Math.min(1, dt*5);
+    // Auto-call elevator down if player is at base and elevator is at top
+    if(elevatorDoorOpen && P.pos.y < elevatorBottomY+4 && elevatorY >= elevatorTopY-1 && elevatorMoving===0){
+      elevatorMoving=-1;
+      showMessage('🏗️ Elevator coming down…',1200);
+    }
   }
 
   // Move elevator
@@ -2142,6 +2258,8 @@ function shoot(){
   ray.setFromCamera(new THREE.Vector2(0,0),camera);
   const targets=[];
   for(const mk of monkeys){if(!mk.dead&&mk.group) mk.group.children.forEach(c=>{if(c.isMesh)targets.push(c);});}
+  for(const sp of spiders){if(!sp.dead&&sp.group) sp.group.traverse(c=>{if(c.isMesh)targets.push(c);});}
+  if(birdActive&&!birdDead&&birdGroup) birdGroup.traverse(c=>{if(c.isMesh){c.userData.isBird=true;targets.push(c);}});
   for(const b of explosiveBarrels){if(!b.exploded) b.group.children.forEach(c=>{if(c.isMesh)targets.push(c);});}
   for(const cr of breakableCrates){if(!cr.broken) cr.group.children.forEach(c=>{if(c.isMesh)targets.push(c);});}
   targets.push(terrainMesh);
@@ -2158,12 +2276,17 @@ function shoot(){
     const h=h0, mk=h.object.userData.monkey;
     if(mk&&!mk.dead){
       const hsc = mk.boss ? 1.4 : 1.0;
-      const headCenterY = mk.pos.y + 1.85 * hsc;   // actual head sphere center
-      const headHitR    = 0.36 * hsc;               // slightly larger than visual (0.32) for hitbox
+      const headCenterY = mk.pos.y + 1.85 * hsc;
+      const headHitR    = 0.36 * hsc;
       const isHeadshot  = Math.abs(h.point.y - headCenterY) <= headHitR;
       const dmg = isHeadshot ? Math.round(w.dmg * w.headMult * playerDamageMult) : Math.round(w.dmg * playerDamageMult);
       mk.takeDamage(dmg, h.point);
       if(isHeadshot){ showHeadshot(); triggerSlowmo(0.25, 0.5); }
+    } else if(h.object.userData.spider&&!h.object.userData.spider.dead){
+      h.object.userData.spider.takeDamage(Math.round(w.dmg*playerDamageMult));
+    } else if(h.object.userData.isBird&&birdActive&&!birdDead){
+      birdHP-=Math.round(w.dmg*playerDamageMult); showHitMarker();
+      if(birdHP<=0) killBird();
     } else if(h.object.userData.barrel&&!h.object.userData.barrel.exploded){
       explodeBarrel(h.object.userData.barrel);
     } else if(h.object.userData.crate&&!h.object.userData.crate.broken){
@@ -2379,6 +2502,21 @@ function interact(){
       if(elevatorY > elevatorBottomY+1){ onElevator=true; elevatorMoving=-1; showMessage('🏗️ Elevator going DOWN…',1500); playFX('jump'); return; }
     }
   }
+  // Cave chests
+  for(const cc of caveChests){
+    if(!cc.collected&&P.pos.distanceTo(cc.pos)<2.8){
+      cc.collected=true; scene.remove(cc.group); if(cc.light) cc.light.intensity=0;
+      const n=2+Math.floor(Math.random()*3);
+      for(let i=0;i<n;i++) spawnBanana(cc.pos.x+(Math.random()-.5)*3,cc.pos.y,cc.pos.z+(Math.random()-.5)*3);
+      playFX('grab'); showMessage(`🍌 Cave chest! Found ${n} bananas!`,2000); return;
+    }
+  }
+  // Plane
+  if(planeGroup&&!inPlane&&P.pos.distanceTo(planeGroup.position)<8){
+    inPlane=true; planeYaw=planeGroup.rotation.y; planePitchAng=0;
+    showMessage('✈️ FLYING! WASD to steer · E to bail out',3500); playFX('jump'); return;
+  }
+  if(inPlane){ inPlane=false; P.vel.set(0,0,0); showMessage('✈️ Bailed out!',1200); playFX('jump'); return; }
   // Crown pickup
   if(crownPos&&!playerHasCrown&&P.pos.distanceTo(crownPos)<3){
     playerHasCrown=true; scene.remove(crownMesh); crownMesh=null;
@@ -2400,8 +2538,9 @@ function interact(){
       showMessage(`📦 STASHED ${P.carried} BANANA${P.carried>1?'S':''}! Total: ${P.stashed}`,2000);
     }
     playFX('stash'); P.carried=0; updateInvHUD();
-    document.getElementById('stash-bar').textContent=`📦 Bananas stashed: ${P.stashed} / 15`;
-    if(P.stashed>=15) winGame(); return;
+    document.getElementById('stash-bar').textContent=`📦 Bananas stashed: ${P.stashed} / 30`;
+    spawnGirlfriendHeart();
+    if(P.stashed>=30) winGame(); return;
   }
   for(const b of bananaItems){
     if(b.collected) continue;
@@ -2537,6 +2676,9 @@ function updateInteractPrompt(){
   }
   if(P.pos.distanceTo(SHOP_POS)<4){ip.innerHTML='<span class="key-hint">E</span> 🏪 Weapon Shop — $'+playerMoney;ip.style.display='block';return;}
   if(P.pos.distanceTo(CAVE_POS)<4){ip.innerHTML='<span class="key-hint">E</span> 🕳️ Enter Secret Tunnel';ip.style.display='block';return;}
+  for(const cc of caveChests){if(!cc.collected&&P.pos.distanceTo(cc.pos)<2.8){ip.innerHTML='<span class="key-hint">E</span> 🍌 Open cave chest';ip.style.display='block';return;}}
+  if(planeGroup&&!inPlane&&P.pos.distanceTo(planeGroup.position)<8){ip.innerHTML='<span class="key-hint">E</span> ✈️ Steal the plane!';ip.style.display='block';return;}
+  if(inPlane){ip.innerHTML='<span class="key-hint">E</span> ✈️ Bail out';ip.style.display='block';return;}
   if(bazookaChest&&bazookaChest.active&&P.pos.distanceTo(bazookaChest.pos)<3.5){ip.innerHTML='<span class="key-hint">E</span> 🚀 Grab Bazooka (+3 rockets)';ip.style.display='block';return;}
   if(crownPos&&!playerHasCrown&&P.pos.distanceTo(crownPos)<3){ip.innerHTML='<span class="key-hint">E</span> 👑 Grab King\'s Crown';ip.style.display='block';return;}
   if(P.pos.distanceTo(stashPos)<5&&(P.carried>0||playerHasCrown)){ip.innerHTML='<span class="key-hint">E</span> Stash bananas'+(playerHasCrown?' + Crown':'');ip.style.display='block';return;}
@@ -2665,25 +2807,30 @@ function playFX(type){
     case 'shoot':{
       const w=P.weapon;
       if(w===0){
-        // Pistol — sharp crack + punchy sub pop
-        noise(.048,5500,1.3);                        // crack transient
-        tone(110,.2,'sine',1.1);                     // sub body thud
-        noise(.11,780,.55,.022);                     // low-mid body
-        tone(2400,.02,'triangle',.22,.05);           // shell clink
+        // Pistol — sharp supersonic crack + deep sub punch
+        noise(.012,22000,2.8);                       // supersonic crack burst
+        noise(.06,5500,2.0,.008);                    // high crack body
+        tone(95,.28,'sine',2.2);                     // sub thud
+        noise(.18,620,.9,.025);                      // low-mid room body
+        tone(2600,.025,'triangle',.35,.05);          // shell clink
+        noise(.22,180,.55,.08);                      // tail rumble
       } else if(w===1){
-        // Rifle — tight mechanical crack, heavier bass
-        noise(.042,4200,1.2);                        // crack burst
-        tone(78,.18,'sine',1.1);                     // sub
-        noise(.05,6500,.38,.012);                    // mechanical tick
-        noise(.13,520,.32,.025);                     // low room echo
+        // Rifle — loud mechanical crack, heavy concussion
+        noise(.015,22000,3.0);                       // supersonic crack
+        noise(.05,4200,2.4,.006);                    // crack burst
+        tone(65,.25,'sine',2.2);                     // deep sub
+        noise(.08,6500,.7,.014);                     // mechanical tick/bolt
+        noise(.22,440,.85,.03);                      // room concussion
+        noise(.45,160,.55,.07);                      // tail rumble
       } else if(w===2){
-        // Sniper — concussive BOOM, loud crack, long tail
-        noise(.032,22000,1.8);                       // full-spectrum crack
-        tone(38,.85,'sine',1.7);                     // deep sub boom
-        tone(90,.42,'sawtooth',.85,.03);             // mid body roar
-        noise(.32,460,.7,.05);                       // reverb body
-        noise(.6,185,.38,.13);                       // long rumble tail
-        doShake(.18,.42);                            // extra screen shake
+        // Sniper — earth-shaking BOOM, huge crack, long reverb tail
+        noise(.018,22000,3.5);                       // ultra-bright crack
+        tone(32,1.2,'sine',3.0);                     // chest-rattling sub boom
+        tone(70,.55,'sawtooth',1.8,.03);             // low roar
+        noise(.04,8000,2.2,.005);                    // high-end bark
+        noise(.5,380,1.4,.06);                       // massive reverb body
+        noise(1.1,140,.7,.18);                       // long canyon rumble
+        doShake(.28,.55);                            // extra screen shake
       } else {
         // Knife — blade whoosh + air cut
         noise(.13,1500,.48);
@@ -3066,6 +3213,10 @@ function rocketExplode(pos){
   for(const b of explosiveBarrels){
     if(!b.exploded&&pos.distanceTo(b.pos)<AOE) setTimeout(()=>explodeBarrel(b),100+Math.random()*200);
   }
+  // Spiders in blast radius
+  for(const sp of spiders){ if(!sp.dead&&pos.distanceTo(sp.pos)<AOE) sp.takeDamage(Math.round(200*(1-pos.distanceTo(sp.pos)/AOE))); }
+  // Bird hit
+  if(birdActive&&!birdDead&&birdGroup&&pos.distanceTo(birdGroup.position)<AOE*1.5){ birdHP-=Math.round(200*(1-pos.distanceTo(birdGroup.position)/(AOE*1.5))); showHitMarker(); if(birdHP<=0) killBird(); }
   noise(.35,350,.9); noise(.12,1800,.45,.04); tone(42,.6,'sawtooth',1.0); tone(75,.3,'sine',.5,.1);
   showMessage('💥 ROCKET EXPLOSION!',1500);
   checkExplosionVsWorld(pos, AOE);
@@ -3303,7 +3454,7 @@ function winGame(){
     document.getElementById('end-title').textContent='🍌 VICTORY!';
     document.getElementById('end-title').style.color='#FFD700';
     document.getElementById('end-msg').textContent='You stole all the bananas from the Monkey Castle!';
-    document.getElementById('end-stats').textContent=`Kills: ${kills} | All 15 bananas stashed! | Time: ${fmtTime(gameTimer)}`;
+    document.getElementById('end-stats').textContent=`Kills: ${kills} | All 30 bananas stashed! | Time: ${fmtTime(gameTimer)}`;
     document.getElementById('end-screen').style.display='flex';
   },2500);
 }
@@ -3334,6 +3485,9 @@ function animate(){
     updateDayNight(rawDt); updateBananaTrail(dt);
     updateWanted(dt); updateBounty(dt); updatePowerUps(dt); updateBazookaChest(dt);
     updateVolcanoSmoke(dt);
+    updateBird(dt);
+    updatePlane(dt);
+    spiders.slice().forEach(s=>s.update(dt));
     // Kill streak timer
     if(killStreakTimer>0){killStreakTimer-=dt;if(killStreakTimer<=0)killStreak=0;}
     updateInteractPrompt(); updateStatsHUD(); drawMinimap(); renderVineLine();
@@ -3876,6 +4030,320 @@ function hitCrate(crate, dmg){
 }
 
 // ────────────────────────────────────────────────
+//  GIRLFRIEND
+// ────────────────────────────────────────────────
+function buildGirlfriend(){
+  const g=new THREE.Group();
+  const skinMat =new THREE.MeshLambertMaterial({color:0xffcc99});
+  const hairMat =new THREE.MeshLambertMaterial({color:0x3a1a00});
+  const dressMat=new THREE.MeshLambertMaterial({color:0xFF5577});
+  const eyeM   =new THREE.MeshBasicMaterial({color:0x222200});
+  const smileMat=new THREE.MeshBasicMaterial({color:0xFF4477});
+  // Torso
+  const torso=new THREE.Mesh(new THREE.CapsuleGeometry(.28,.72,4,7),dressMat); torso.position.y=1.2; g.add(torso);
+  // Head
+  const head=new THREE.Mesh(new THREE.SphereGeometry(.28,8,6),skinMat); head.position.y=2.1; g.add(head);
+  // Hair (long dark)
+  const hair=new THREE.Mesh(new THREE.SphereGeometry(.30,8,6),hairMat); hair.position.set(0,2.15,-.04); g.add(hair);
+  const hairLong=new THREE.Mesh(new THREE.CylinderGeometry(.2,.14,.9,6),hairMat); hairLong.position.set(0,1.78,-.22); g.add(hairLong);
+  // Eyes
+  for(const ex of [-.1,.1]){ const eye=new THREE.Mesh(new THREE.SphereGeometry(.045,4,3),eyeM); eye.position.set(ex,2.12,.27); g.add(eye); }
+  // Smile
+  const smile=new THREE.Mesh(new THREE.TorusGeometry(.075,.018,4,8,Math.PI),smileMat); smile.rotation.z=Math.PI; smile.position.set(0,2.02,.28); g.add(smile);
+  // Arms
+  for(const ax of [-.35,.35]){ const arm=new THREE.Mesh(new THREE.CapsuleGeometry(.08,.5,3,5),dressMat); arm.position.set(ax,1.5,0); arm.rotation.z=ax>0?.3:-.3; g.add(arm); }
+  // Legs (sitting)
+  for(const lx of [-.13,.13]){ const leg=new THREE.Mesh(new THREE.CapsuleGeometry(.1,.55,3,5),dressMat); leg.position.set(lx,.65,.28); leg.rotation.x=-.8; g.add(leg); }
+  const hx=HOME_BASE.x, hz=HOME_BASE.z, hy=th(hx,hz);
+  g.position.set(hx+1, hy, hz+3.3);
+  g.rotation.y=Math.PI;
+  g.traverse(c=>{if(c.isMesh) c.castShadow=true;});
+  scene.add(g);
+  girlfriendGroup=g;
+}
+function spawnGirlfriendHeart(){
+  if(!girlfriendGroup) return;
+  // Project her 3D world position to screen
+  const wp=new THREE.Vector3(HOME_BASE.x+1, th(HOME_BASE.x,HOME_BASE.z)+4, HOME_BASE.z+3.3);
+  wp.project(camera);
+  const sx=(wp.x*.5+.5)*window.innerWidth;
+  const sy=(-wp.y*.5+.5)*window.innerHeight;
+  const el=document.createElement('div');
+  el.className='gf-heart'; el.textContent='❤️';
+  el.style.left=sx+'px'; el.style.top=sy+'px';
+  document.body.appendChild(el);
+  setTimeout(()=>el.remove(),1700);
+  // Bounce girlfriend
+  let bt=0;
+  const bi=setInterval(()=>{
+    bt+=0.12; if(girlfriendGroup) girlfriendGroup.position.y=th(HOME_BASE.x,HOME_BASE.z)+Math.abs(Math.sin(bt*Math.PI))*0.35;
+    if(bt>=1) clearInterval(bi);
+  },40);
+}
+
+// ────────────────────────────────────────────────
+//  CAVE ROOMS + SPIDERS
+// ────────────────────────────────────────────────
+function buildCaveRooms(){
+  const cx=CAVE_POS.x, cz=CAVE_POS.z;
+  const rockMat=new THREE.MeshLambertMaterial({color:0x1e1e18});
+  const crystalMat=new THREE.MeshBasicMaterial({color:0x2244FF,transparent:true,opacity:.65});
+  const torchMat=new THREE.MeshLambertMaterial({color:0x6a3010});
+  // 3 chambers around cave entrance
+  const chambers=[{x:cx-16,z:cz-4},{x:cx-24,z:cz+14},{x:cx-6,z:cz+22}];
+  for(const ch of chambers){
+    const cy=th(ch.x,ch.z);
+    const cg=new THREE.Group(); cg.position.set(ch.x,cy,ch.z);
+    // Floor disc
+    const floor=new THREE.Mesh(new THREE.CylinderGeometry(6.5,7.5,.28,10),rockMat); floor.position.y=.14; cg.add(floor);
+    // Boulder walls with two gaps
+    for(let i=0;i<12;i++){
+      if(i===0||i===6) continue;
+      const a=(i/12)*Math.PI*2;
+      const wb=new THREE.Mesh(new THREE.DodecahedronGeometry(1.6+Math.random()*.7,0),rockMat);
+      wb.position.set(Math.cos(a)*6.5,1.4,Math.sin(a)*6.5);
+      wb.rotation.set(Math.random()*2,Math.random()*2,Math.random()*2); cg.add(wb);
+    }
+    // Stalactites
+    for(let i=0;i<7;i++){
+      const sx=(Math.random()-.5)*9,sz=(Math.random()-.5)*9;
+      const s=new THREE.Mesh(new THREE.ConeGeometry(.22+Math.random()*.18,1.8+Math.random(),5),rockMat);
+      s.rotation.x=Math.PI; s.position.set(sx,5,sz); cg.add(s);
+    }
+    // Glowing crystals
+    for(let i=0;i<4;i++){
+      const a=Math.random()*Math.PI*2;
+      const cr=new THREE.Mesh(new THREE.ConeGeometry(.18,.75,4),crystalMat);
+      cr.position.set(Math.cos(a)*4,.6,Math.sin(a)*4); cr.rotation.x=.25+Math.random()*.2; cg.add(cr);
+    }
+    // Torch
+    const torch=new THREE.Mesh(new THREE.CylinderGeometry(.08,.08,.7,5),torchMat);
+    torch.position.set(3.8,.9,0); cg.add(torch);
+    const tFlame=new THREE.Mesh(new THREE.SphereGeometry(.14,5,4),new THREE.MeshBasicMaterial({color:0xFF8800}));
+    tFlame.position.set(3.8,1.45,0); cg.add(tFlame);
+    const tLight=new THREE.PointLight(0xFF7700,3.5,16); tLight.position.set(3.8,1.7,0); cg.add(tLight);
+    cg.traverse(c=>{if(c.isMesh){c.castShadow=true;c.receiveShadow=true;}});
+    scene.add(cg);
+    // Banana chest
+    buildCaveChest(new THREE.Vector3(ch.x+2,cy+.6,ch.z+2));
+  }
+  // Spawn 5 spiders
+  for(let i=0;i<5;i++){
+    const a=Math.random()*Math.PI*2, r=8+Math.random()*22;
+    spiders.push(new Spider(cx+Math.cos(a)*r, cz+Math.sin(a)*r));
+  }
+}
+function buildCaveChest(pos){
+  const wm=new THREE.MeshLambertMaterial({color:0x3a2010});
+  const gm=new THREE.MeshLambertMaterial({color:0xFF6600});
+  const g=new THREE.Group();
+  const base=new THREE.Mesh(new THREE.BoxGeometry(1,.72,.72),wm); base.position.y=.36; g.add(base);
+  const lid =new THREE.Mesh(new THREE.BoxGeometry(1,.3,.72),wm);  lid.position.y=.87;  g.add(lid);
+  const trim=new THREE.Mesh(new THREE.BoxGeometry(1.04,.11,.76),gm); trim.position.y=.68; g.add(trim);
+  const gl  =new THREE.PointLight(0xFF6600,2,6); gl.position.y=1; g.add(gl);
+  g.position.copy(pos);
+  g.traverse(c=>{if(c.isMesh) c.castShadow=true;});
+  scene.add(g);
+  caveChests.push({group:g,pos:pos.clone(),collected:false,light:gl});
+}
+
+// ────────────────────────────────────────────────
+//  GIANT BIRD BOSS
+// ────────────────────────────────────────────────
+function spawnBird(){
+  if(birdActive) return;
+  birdActive=true; birdDead=false; birdHP=BIRD_MAX_HP;
+  birdAngle=Math.random()*Math.PI*2; birdSwoopTimer=16;
+  const g=new THREE.Group();
+  const bMat =new THREE.MeshLambertMaterial({color:0x2c1e0a});
+  const wMat =new THREE.MeshLambertMaterial({color:0x1e1408,side:THREE.DoubleSide});
+  const bkMat=new THREE.MeshLambertMaterial({color:0xEEAA00});
+  const eMat =new THREE.MeshBasicMaterial({color:0xFF2200});
+  // Body
+  const body=new THREE.Mesh(new THREE.SphereGeometry(4,8,6),bMat);
+  body.scale.set(1,.7,1.9); g.add(body);
+  // Head
+  const head=new THREE.Mesh(new THREE.SphereGeometry(2.4,7,5),bMat);
+  head.position.set(0,1.2,5.5); g.add(head);
+  // Beak
+  const beak=new THREE.Mesh(new THREE.ConeGeometry(.55,3.2,5),bkMat);
+  beak.rotation.x=Math.PI/2; beak.position.set(0,.7,8.5); g.add(beak);
+  // Eyes
+  for(const ex of [-1.6,1.6]){ const eye=new THREE.Mesh(new THREE.SphereGeometry(.55,5,4),eMat); eye.position.set(ex,2,7); g.add(eye); }
+  // Wings (each is a BoxGeometry flat plane)
+  for(const sx of [-1,1]){
+    const w1=new THREE.Mesh(new THREE.BoxGeometry(19,.3,6.5),wMat);
+    w1.position.set(sx*9.5,0,0); w1.rotation.z=sx*.12; w1.userData={sx,base:sx*.12}; g.add(w1);
+    const w2=new THREE.Mesh(new THREE.BoxGeometry(4.5,.22,5),wMat);
+    w2.position.set(sx*18.5,-1,0); w2.rotation.z=sx*.32; g.add(w2);
+  }
+  // Tail feathers
+  for(let t=0;t<6;t++){
+    const ta=(t/5-.5)*.7;
+    const tf=new THREE.Mesh(new THREE.BoxGeometry(1.4,.22,5.5),wMat);
+    tf.position.set(ta*5,-.8,-5.5); tf.rotation.y=ta*.3; g.add(tf);
+  }
+  g.traverse(c=>{if(c.isMesh){c.userData.isBird=true; c.castShadow=true;}});
+  const sx=P.pos.x+Math.cos(birdAngle)*80, sz=P.pos.z+Math.sin(birdAngle)*80;
+  g.position.set(sx, P.pos.y+40, sz);
+  scene.add(g); birdGroup=g;
+  announce('🦅 GIANT BIRD INCOMING!');
+  showMessage('🦅 SHOOT IT DOWN before it eats you!',5000);
+  doShake(.3,.5);
+  // Distant screech sound
+  tone(800,.05,'sawtooth',.8); tone(400,.4,'sawtooth',.6,.05); tone(200,.8,'sine',.4,.2);
+}
+function killBird(){
+  if(birdDead) return;
+  birdDead=true; birdDeathTimer=3.5;
+  announce('🦅 BIRD SHOT DOWN!');
+  showMessage('🦅 Giant bird defeated! Bananas dropped!',2500);
+  doShake(.55,1.0);
+  // Drop 4 bananas under bird
+  if(birdGroup){
+    for(let i=0;i<4;i++){
+      const bx=birdGroup.position.x+(Math.random()-.5)*15;
+      const bz=birdGroup.position.z+(Math.random()-.5)*15;
+      spawnBanana(bx,th(bx,bz)+.1,bz);
+    }
+  }
+  noise(.5,350,.9); noise(.2,1800,.5,.05); tone(45,.6,'sawtooth',1.0);
+}
+function updateBird(dt){
+  if(!birdActive){
+    birdTimer-=dt;
+    if(birdTimer<=0){birdTimer=180; spawnBird();}
+    return;
+  }
+  if(!birdGroup) return;
+  if(birdDead){
+    birdDeathTimer-=dt;
+    birdGroup.position.y-=22*dt;
+    birdGroup.rotation.z+=dt*1.8;
+    if(birdDeathTimer<=0){scene.remove(birdGroup);birdGroup=null;birdActive=false;birdDead=false;}
+    return;
+  }
+  birdSwoopTimer-=dt;
+  birdAngle+=dt*.55;
+  let tx,ty,tz;
+  const swooping=birdSwoopTimer<=0;
+  if(swooping){
+    tx=P.pos.x; tz=P.pos.z; ty=P.pos.y+4;
+    const bd=birdGroup.position.distanceTo(P.pos);
+    if(bd<7){ dealDamage(28); doShake(.35,.5); birdSwoopTimer=16; }
+    if(birdGroup.position.y<P.pos.y+1) birdSwoopTimer=14;
+  } else {
+    tx=P.pos.x+Math.cos(birdAngle)*55;
+    tz=P.pos.z+Math.sin(birdAngle)*55;
+    ty=P.pos.y+38;
+  }
+  const bspd=swooping?32:22;
+  const dx=tx-birdGroup.position.x, dy=ty-birdGroup.position.y, dz=tz-birdGroup.position.z;
+  const dist=Math.sqrt(dx*dx+dy*dy+dz*dz);
+  if(dist>0.5){
+    birdGroup.position.x+=dx/dist*bspd*dt;
+    birdGroup.position.y+=dy/dist*bspd*dt*.55;
+    birdGroup.position.z+=dz/dist*bspd*dt;
+    birdGroup.rotation.y=Math.atan2(dx,dz);
+  }
+  // Wing flap
+  const flapT=Math.sin(Date.now()*.0055)*(swooping?.6:.35);
+  birdGroup.children.forEach(c=>{
+    if(c.userData&&c.userData.sx!==undefined) c.rotation.z=c.userData.base+c.userData.sx*flapT;
+  });
+}
+
+// ────────────────────────────────────────────────
+//  PLANE
+// ────────────────────────────────────────────────
+function buildPlane(){
+  const g=new THREE.Group();
+  const bodyMat=new THREE.MeshLambertMaterial({color:0x3d6b2a});
+  const darkMat=new THREE.MeshLambertMaterial({color:0x253d18});
+  const propMat=new THREE.MeshLambertMaterial({color:0x222222});
+  const glassMat=new THREE.MeshLambertMaterial({color:0x88BBDD,transparent:true,opacity:.55});
+  const redMat =new THREE.MeshLambertMaterial({color:0xCC1100});
+  // Fuselage
+  const fuse=new THREE.Mesh(new THREE.CylinderGeometry(.9,.6,9,8),bodyMat); fuse.rotation.z=Math.PI/2; g.add(fuse);
+  // Nose cone
+  const nose=new THREE.Mesh(new THREE.ConeGeometry(.9,2.8,8),bodyMat); nose.rotation.z=-Math.PI/2; nose.position.x=5.9; g.add(nose);
+  // Cockpit bubble
+  const cockpit=new THREE.Mesh(new THREE.SphereGeometry(.85,7,5),glassMat); cockpit.scale.set(1,.7,1.6); cockpit.position.set(-.4,.75,0); g.add(cockpit);
+  // Main wings
+  for(const sz of [-1,1]){
+    const wing=new THREE.Mesh(new THREE.BoxGeometry(7.5,.18,3.2),bodyMat); wing.position.set(-.5,0,sz*5.2); wing.rotation.x=sz*.07; g.add(wing);
+    const aileron=new THREE.Mesh(new THREE.BoxGeometry(2.2,.2,.6),darkMat); aileron.position.set(-.5,.1,sz*7.8); g.add(aileron);
+  }
+  // Horizontal stabiliser
+  for(const sz of [-1,1]){ const stab=new THREE.Mesh(new THREE.BoxGeometry(2.8,.15,1.6),bodyMat); stab.position.set(-4.5,.1,sz*2.4); g.add(stab); }
+  // Vertical fin
+  const fin=new THREE.Mesh(new THREE.BoxGeometry(2.2,.15,2.6),bodyMat); fin.rotation.x=Math.PI/2; fin.position.set(-4.5,1.3,0); g.add(fin);
+  // Propeller hub + 3 blades
+  const hub=new THREE.Mesh(new THREE.CylinderGeometry(.35,.35,.3,8),propMat); hub.rotation.z=Math.PI/2; hub.position.x=7.2; g.add(hub);
+  const propGrp=new THREE.Group(); propGrp.position.x=7.35;
+  for(let i=0;i<3;i++){
+    const blade=new THREE.Mesh(new THREE.BoxGeometry(.18,3.5,.09),propMat);
+    blade.rotation.x=(i/3)*Math.PI*2; propGrp.add(blade);
+  }
+  g.add(propGrp);
+  // Wheels
+  for(const [wx,wz] of [[-.5,-2.2],[-.5,2.2]]){ const wh=new THREE.Mesh(new THREE.CylinderGeometry(.36,.36,.26,8),darkMat); wh.rotation.x=Math.PI/2; wh.position.set(wx,-1.05,wz); g.add(wh); }
+  // Red nose stripe
+  const stripe=new THREE.Mesh(new THREE.CylinderGeometry(.91,.78,.45,8),redMat); stripe.rotation.z=Math.PI/2; stripe.position.x=5.3; g.add(stripe);
+  // Star insignia on wing
+  const star=new THREE.Mesh(new THREE.CircleGeometry(.5,5),redMat); star.rotation.x=-Math.PI/2; star.position.set(-.5,.11,5.2); g.add(star);
+
+  g.userData.propGrp=propGrp;
+  const py=th(PLANE_SPAWN.x,PLANE_SPAWN.z)+1.9;
+  PLANE_SPAWN.y=py;
+  g.position.set(PLANE_SPAWN.x,py,PLANE_SPAWN.z);
+  g.rotation.y=planeYaw;
+  g.traverse(c=>{if(c.isMesh){c.castShadow=true;c.receiveShadow=true;}});
+  scene.add(g); planeGroup=g;
+
+  // Landing strip
+  const stripMat=new THREE.MeshLambertMaterial({color:0x2a2a2a});
+  const strip=new THREE.Mesh(new THREE.BoxGeometry(5,.08,35),stripMat);
+  strip.position.set(PLANE_SPAWN.x,py-1.82,PLANE_SPAWN.z);
+  scene.add(strip);
+  for(let i=0;i<6;i++){
+    const mark=new THREE.Mesh(new THREE.BoxGeometry(.32,.09,2.2),new THREE.MeshBasicMaterial({color:0xFFFFFF}));
+    mark.position.set(PLANE_SPAWN.x,py-1.81,PLANE_SPAWN.z-12+i*5); scene.add(mark);
+  }
+  // Small hangar shed
+  const hMat=new THREE.MeshLambertMaterial({color:0x5a5040});
+  const hSide=new THREE.Mesh(new THREE.BoxGeometry(.3,3,7),hMat); hSide.position.set(PLANE_SPAWN.x-4,py+1.5,PLANE_SPAWN.z); scene.add(hSide);
+  const hRoof=new THREE.Mesh(new THREE.BoxGeometry(6,.2,7),hMat); hRoof.rotation.z=.35; hRoof.position.set(PLANE_SPAWN.x-1.5,py+3.2,PLANE_SPAWN.z); scene.add(hRoof);
+  const hLight=new THREE.PointLight(0xFFDD88,2.5,20); hLight.position.set(PLANE_SPAWN.x,py+3,PLANE_SPAWN.z); scene.add(hLight);
+}
+function updatePlane(dt){
+  if(!planeGroup) return;
+  if(planeGroup.userData.propGrp) planeGroup.userData.propGrp.rotation.x+=dt*(inPlane?22:3);
+  if(!inPlane) return;
+  const turn=1.4;
+  if(keys['KeyA']||keys['ArrowLeft'])  planeYaw+=turn*dt;
+  if(keys['KeyD']||keys['ArrowRight']) planeYaw-=turn*dt;
+  if(keys['KeyW']||keys['ArrowUp'])    planePitchAng=Math.max(-.55,planePitchAng-.9*dt);
+  if(keys['KeyS']||keys['ArrowDown'])  planePitchAng=Math.min(.4,planePitchAng+.9*dt);
+  const spd=38;
+  const fwd=new THREE.Vector3(Math.sin(planeYaw),-planePitchAng,Math.cos(planeYaw)).normalize();
+  planeGroup.position.addScaledVector(fwd,spd*dt);
+  const minY=th(planeGroup.position.x,planeGroup.position.z)+4;
+  planeGroup.position.y=Math.max(minY,Math.min(85,planeGroup.position.y));
+  planeGroup.position.x=Math.max(-MAP/2+8,Math.min(MAP/2-8,planeGroup.position.x));
+  planeGroup.position.z=Math.max(-MAP/2+8,Math.min(MAP/2-8,planeGroup.position.z));
+  planeGroup.rotation.y=planeYaw;
+  planeGroup.rotation.x=planePitchAng*.5;
+  // Player sits in cockpit
+  P.pos.set(
+    planeGroup.position.x-Math.sin(planeYaw)*.8,
+    planeGroup.position.y+.9,
+    planeGroup.position.z-Math.cos(planeYaw)*.8
+  );
+  P.vel.set(0,0,0); P.onGround=false;
+}
+
+// ────────────────────────────────────────────────
 //  HOME BASE
 // ────────────────────────────────────────────────
 function buildHomeBase(){
@@ -4319,6 +4787,17 @@ function buildMountain(){
     const pole=new THREE.Mesh(new THREE.CylinderGeometry(.12,.12,PEAK+4,5),poleMat);
     pole.position.set(mx+ox, bY+PEAK/2, mz+oz); scene.add(pole);
   }
+  // Wall-mounted torches inside shaft at regular intervals
+  const shaftTorchMat=new THREE.MeshLambertMaterial({color:0x7a3a10});
+  const torchHeights=[bY+8, bY+20, bY+32, bY+44];
+  for(const ty2 of torchHeights){
+    const side=torchHeights.indexOf(ty2)%2===0?1:-1;
+    const th2=new THREE.Mesh(new THREE.CylinderGeometry(.09,.09,.7,5),shaftTorchMat);
+    th2.position.set(mx+side*2.5, ty2, mz); scene.add(th2);
+    const fb=new THREE.Mesh(new THREE.SphereGeometry(.16,5,4),new THREE.MeshBasicMaterial({color:0xFF9900}));
+    fb.position.set(mx+side*2.5, ty2+.55, mz); scene.add(fb);
+    const tl=new THREE.PointLight(0xFF7700,2.5,12); tl.position.set(mx+side*2.5, ty2+.7, mz); scene.add(tl);
+  }
 
   // ── Wooden door on south face of mountain ────────────────────────────
   // Placed right at the mountain surface (~39 units south of centre)
@@ -4741,7 +5220,7 @@ function updateFootsteps(dt){
 // ────────────────────────────────────────────────
 function init(){
   initThree(); buildTerrain(); buildPond(); buildCastle(); buildStairs(); buildStash(); buildRocks(); plantForest();
-  buildHomeBase(); buildBarrels(); buildCrates(); buildMonkeyVillage(); buildCave(); buildMountain(); buildZiplines();
+  buildHomeBase(); buildGirlfriend(); buildBarrels(); buildCrates(); buildMonkeyVillage(); buildCave(); buildCaveRooms(); buildMountain(); buildZiplines(); buildPlane();
   buildFort(-60,-56); buildFort(56,-70); buildFort(-76,56); buildFort(90,30);
   buildPlayer(); placeBananas(); spawnMonkeys(); placeAmmoPickups();
   // Set mountain perch chest spot y now that STAIR_ZONES are registered
