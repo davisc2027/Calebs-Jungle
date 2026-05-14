@@ -361,7 +361,7 @@ const SHOP_POS   = new THREE.Vector3(-136, 0, -126); // weapon shop counter at h
 // ── New game systems ─────────────────────────────
 let gameTimer = 0;
 let dayTime = 0.35;
-let sunRef = null, ambRef = null;
+let sunRef = null, ambRef = null, caveAmbient = null;
 let killStreak = 0, killStreakTimer = 0;
 let waveMode = false, waveNum = 0, waveActive = false, waveSpawnQueue = 0, waveSpawnTimer = 0, waveBananaCollected = false;
 let throwBananasLeft = 3;
@@ -656,6 +656,8 @@ function initThree() {
   scene.add(sun);
   const amb = new THREE.AmbientLight(0x90c090, 0.7); ambRef = amb; scene.add(amb);
   scene.add(new THREE.HemisphereLight(0x87CEEB, 0x3a7d44, 0.5));
+  // Dedicated cave light — pure white, starts off, only active underground
+  const cave = new THREE.AmbientLight(0xffffff, 0); caveAmbient = cave; scene.add(cave);
 
   mmCtx = document.getElementById('mm-canvas').getContext('2d');
 }
@@ -2581,8 +2583,9 @@ function interact(){
         P.pos.set(ve.sx, VENT_FLOOR+.6, ve.sz); P.vel.set(0,0,0);
         // Go dark underground
         scene.background=new THREE.Color(0x08080e);
-        scene.fog=new THREE.Fog(0x08080e,3,28);
-        if(ambRef) ambRef.intensity=0.08;
+        scene.fog=new THREE.Fog(0x08080e,60,90); // fog only closes in at far end of tunnel
+        if(ambRef) ambRef.intensity=0; // kill outdoor ambient; cave light takes over
+        if(caveAmbient) caveAmbient.intensity=2.2; // bright as day underground
         playFX('grab');
         showMessage('🕳️ Entered underground tunnels… watch for spiders!',2500); return;
       }
@@ -2599,6 +2602,7 @@ function interact(){
         scene.background=new THREE.Color(0x7ec8e3);
         scene.fog=new THREE.FogExp2(0x3a6b3a,0.004);
         if(ambRef) ambRef.intensity=0.7;
+        if(caveAmbient) caveAmbient.intensity=0; // kill cave light above ground
         playFX('grab');
         showMessage('☀️ Back on the surface!',1500); return;
       }
