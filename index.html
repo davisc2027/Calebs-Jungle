@@ -1625,6 +1625,7 @@ class Spider{
       leg.rotation.z=side*(Math.PI/2-a*.4); leg.rotation.x=-.3;
       g.add(leg);
     }
+    g.scale.set(2.2,2.2,2.2); // bigger so bullets can actually hit it
     g.traverse(c=>{if(c.isMesh){c.userData.spider=this; c.castShadow=true;}});
     g.position.copy(this.pos);
     this.group=g; scene.add(g);
@@ -1640,10 +1641,21 @@ class Spider{
     if(d<20) this.state='chase';
     else if(d>32) this.state='patrol';
     if(this.state==='chase'){
-      const dir=P.pos.clone().sub(this.pos); dir.y=0; dir.normalize();
-      this.pos.x+=dir.x*9*dt; this.pos.z+=dir.z*9*dt;
+      const dir=P.pos.clone().sub(this.pos); dir.y=0;
+      const hd=dir.length(); dir.normalize();
+      const STANDOFF=5.5; // orbit distance — always shootable
+      if(hd>STANDOFF+0.5){
+        // Close in
+        this.pos.x+=dir.x*9*dt; this.pos.z+=dir.z*9*dt;
+      } else if(hd<STANDOFF-0.5){
+        // Back off
+        this.pos.x-=dir.x*5*dt; this.pos.z-=dir.z*5*dt;
+      } else {
+        // Strafe sideways at standoff — circle the player
+        this.pos.x+=(-dir.z)*7*dt; this.pos.z+=(dir.x)*7*dt;
+      }
       this.group.rotation.y=Math.atan2(dir.x,dir.z);
-      if(d<2.0&&this.attackCD<=0){dealDamage(1); this.attackCD=1.8; doShake(.02,.08);}
+      if(hd<STANDOFF+1&&this.attackCD<=0){dealDamage(1); this.attackCD=2.2; doShake(.02,.08);}
     } else {
       this.patrolTimer-=dt;
       if(this.patrolTimer<=0){
@@ -2186,7 +2198,7 @@ function resolveCollisions(){
   for(const sp of spiders){
     if(sp.dead) continue;
     const dx=P.pos.x-sp.pos.x, dz=P.pos.z-sp.pos.z;
-    const d2=dx*dx+dz*dz, need=0.65+PR;
+    const d2=dx*dx+dz*dz, need=1.4+PR;
     if(d2<need*need&&d2>0.001){
       const d=Math.sqrt(d2), push=(need-d)/d;
       P.pos.x+=dx*push; P.pos.z+=dz*push;
