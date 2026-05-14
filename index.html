@@ -2548,6 +2548,10 @@ function interact(){
       if(Math.sqrt(dx*dx+dz*dz)<4 && Math.abs(P.pos.y-ve.sy)<4){
         inCave=true;
         P.pos.set(ve.sx, VENT_FLOOR+.6, ve.sz); P.vel.set(0,0,0);
+        // Go dark underground
+        scene.background=new THREE.Color(0x08080e);
+        scene.fog=new THREE.Fog(0x08080e,3,28);
+        if(ambRef) ambRef.intensity=0.08;
         playFX('grab');
         showMessage('🕳️ Entered underground tunnels… watch for spiders!',2500); return;
       }
@@ -2560,6 +2564,10 @@ function interact(){
       if(Math.sqrt(dx*dx+dz*dz)<4 && Math.abs(P.pos.y-VENT_FLOOR)<3){
         inCave=false;
         P.pos.set(ve.sx, ve.sy+1.5, ve.sz); P.vel.set(0,0,0);
+        // Restore surface sky/fog/ambient
+        scene.background=new THREE.Color(0x7ec8e3);
+        scene.fog=new THREE.FogExp2(0x3a6b3a,0.004);
+        if(ambRef) ambRef.intensity=0.7;
         playFX('grab');
         showMessage('☀️ Back on the surface!',1500); return;
       }
@@ -4295,6 +4303,22 @@ function buildCaveSystem(){
   const floorMat =new THREE.MeshLambertMaterial({color:0x161614});
   const torchMat =new THREE.MeshLambertMaterial({color:0x6a3010});
 
+  // ── Bedrock shell — seals the underground so sky can't show through ──
+  const bedrockMat=new THREE.MeshLambertMaterial({color:0x181816,side:THREE.DoubleSide});
+  const BSIZE=MAP+60; // slightly bigger than map
+  // Ceiling sheet (top of tunnel space)
+  const bCeil=new THREE.Mesh(new THREE.PlaneGeometry(BSIZE,BSIZE),bedrockMat);
+  bCeil.rotation.x=Math.PI/2; bCeil.position.set(0,flY+cH+0.6,0); scene.add(bCeil);
+  // Floor sheet
+  const bFloor=new THREE.Mesh(new THREE.PlaneGeometry(BSIZE,BSIZE),bedrockMat);
+  bFloor.rotation.x=-Math.PI/2; bFloor.position.set(0,flY-0.6,0); scene.add(bFloor);
+  // Four side walls
+  for(const[sx,sz,rx,rz] of [[0,-BSIZE/2,0,-1],[0,BSIZE/2,0,1],[-BSIZE/2,0,-1,0],[BSIZE/2,0,1,0]]){
+    const bw=new THREE.Mesh(new THREE.PlaneGeometry(BSIZE,cH+2),bedrockMat);
+    bw.position.set(sx,flY+cH/2,sz);
+    bw.rotation.y=Math.atan2(rx,rz); scene.add(bw);
+  }
+
   // ── Helpers ──────────────────────────────────────
   function addTorch(x,y,z,col){
     col=col||0xFF7700;
@@ -4302,7 +4326,7 @@ function buildCaveSystem(){
     st.position.set(x,y,z); scene.add(st);
     const sf=new THREE.Mesh(new THREE.SphereGeometry(.14,5,4),new THREE.MeshBasicMaterial({color:0xFF8800}));
     sf.position.set(x,y+.55,z); scene.add(sf);
-    const sl=new THREE.PointLight(col,3.5,16); sl.position.set(x,y+.8,z); scene.add(sl);
+    const sl=new THREE.PointLight(col,9,28); sl.position.set(x,y+.8,z); scene.add(sl);
   }
   function addStalactites(midX,midZ,halfW,halfL,count){
     for(let i=0;i<count;i++){
@@ -6091,6 +6115,7 @@ const _skyNight=new THREE.Color(0x020408);
 const _skyDay  =new THREE.Color(0x7ec8e3);
 const _skyDawn =new THREE.Color(0xff7733);
 function updateDayNight(dt){
+  if(inCave) return; // don't overwrite underground sky/fog/ambient
   dayTime=(dayTime+dt*0.003)%1;
   const t=Math.sin(dayTime*Math.PI); // 0 at night, 1 at noon
   if(sunRef){
