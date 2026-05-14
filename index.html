@@ -3348,6 +3348,24 @@ function updateCamera(dt){
 
   const cosP=Math.cos(P.pitch),sinP=Math.sin(P.pitch),sinY=Math.sin(P.yaw),cosY=Math.cos(P.yaw);
 
+  // ── Underground camera: tight centre-follow, no side offset ──────────
+  // The normal OTS camera (5.5 back + 3.5 right) sits outside the 5.5-unit
+  // tunnel walls in solid rock. Use a close centred follow instead.
+  if(inCave){
+    const BACK=2.8, CH=1.4;
+    const cx=P.pos.x - sinY*cosP*BACK;
+    const cy=Math.min(VENT_FLOOR+3.2, P.pos.y + sinP*BACK + CH);
+    const cz=P.pos.z - cosY*cosP*BACK;
+    camera.position.set(cx,cy,cz);
+    const AHEAD=8;
+    camera.lookAt(
+      P.pos.x + sinY*cosP*AHEAD,
+      P.pos.y - sinP*AHEAD + 1.2,
+      P.pos.z + cosY*cosP*AHEAD
+    );
+    return;
+  }
+
   // Right vector (perpendicular to yaw in XZ plane)
   const rightX= cosY, rightZ=-sinY;
 
@@ -3355,13 +3373,11 @@ function updateCamera(dt){
   let cx = P.pos.x - sinY*cosP*CAM_DIST - rightX*OTS_OFFSET;
   let cy = P.pos.y + sinP*CAM_DIST + CAM_H + P.camBob;
   let cz = P.pos.z - cosY*cosP*CAM_DIST - rightZ*OTS_OFFSET;
-  const camTY=th(cx,cz)+1; if(!inCave && cy<camTY) cy=camTY;
+  const camTY=th(cx,cz)+1; if(cy<camTY) cy=camTY;
   if(shakeT>0){shakeT-=dt;cx+=(Math.random()-.5)*shakeA*2;cy+=(Math.random()-.5)*shakeA;cz+=(Math.random()-.5)*shakeA*2;}
   camera.position.set(cx,cy,cz);
 
   // Look at a point AHEAD of the player (not back at the player).
-  // Camera is right of player → player falls naturally to left of screen.
-  // The look target rides the pitch so aiming up/down feels correct.
   const LOOK_AHEAD = 10;
   const lx = P.pos.x + sinY*cosP*LOOK_AHEAD;
   const ly = P.pos.y - sinP*LOOK_AHEAD + 1.5;
