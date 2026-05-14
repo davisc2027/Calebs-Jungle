@@ -454,6 +454,8 @@ const spiders     = [];
 const caveChests  = [];  // {group, pos, collected}
 let   inCave      = false;
 let   caveFloorY  = 0;
+const VENT_FLOOR  = -20;  // fixed underground level (absolute y)
+const VENT_ENTRIES = [];   // {sx,sz,sy} — populated in buildCaveSystem
 const TUNNEL_WALLS = [];  // AABB side walls — only enforced while inCave
 const HUT_WALLS    = [];  // AABB walls for cabin — always enforced
 const caveTunnelEntryPos = new THREE.Vector3();
@@ -485,6 +487,14 @@ let planeLookYaw    = 0;         // cockpit mouse-look offset (relative to plane
 let planeLookPitch  = 0;
 let planeCrashing   = false;
 const planeCrashVel = new THREE.Vector3();
+let planeLanding    = false;  // smooth landing sequence
+// ── Plane tricks ─────────────────────────────────
+let barrelRollTimer = 0, barrelRollDir = 1;
+let loopTimer       = 0;
+let planeBoosting   = false;
+let aileronRollTimer= 0;
+let divePullTimer   = 0;
+let trickCD         = 0;  // 3s cooldown between tricks
 
 // ── Bird corpse ───────────────────────────────────
 let birdCorpseGroup = null;
@@ -1653,8 +1663,10 @@ class Spider{
       const sh=getStairH(this.pos.x,this.pos.z,this.pos.y);
       this.pos.y=(sh>-Infinity)?sh:th(this.pos.x,this.pos.z);
     }
-    // Leg bob animation
-    this.pos.y+=Math.sin(Date.now()*.012)*0.04;
+    // Leg bob animation — only when nearby in cave (perf optimization)
+    if(inCave && P.pos.distanceTo(this.pos)<30){
+      this.pos.y+=Math.sin(Date.now()*.012)*0.04;
+    }
     this.group.position.copy(this.pos);
   }
   takeDamage(amount){
@@ -2392,6 +2404,8 @@ function spawnImpact(pos){
   }
 }
 function updateSparks(dt){
+  // Cap sparks at 200 — remove oldest to keep performance
+  while(sparks.length>200){ const old=sparks.shift(); scene.remove(old.mesh); }
   for(let i=sparks.length-1;i>=0;i--){
     const s=sparks[i]; s.age+=dt;
     s.vel.y -= GRAVITY * dt;
@@ -2529,19 +2543,29 @@ function interact(){
   }
   // Weapon shop
   if(P.pos.distanceTo(SHOP_POS)<4){ openShop(); return; }
-  // Cave entry (surface → tunnels)
-  if(!inCave && P.pos.distanceTo(CAVE_POS)<4){
-    inCave=true;
-    P.pos.copy(caveTunnelEntryPos); P.vel.set(0,0,0);
-    playFX('grab');
-    showMessage('🕳️ Entered the cave tunnels… watch for spiders!',2500); return;
+  // Vent entry (surface → underground tunnels)
+  if(!inCave){
+    for(const ve of VENT_ENTRIES){
+      const dx=P.pos.x-ve.sx, dz=P.pos.z-ve.sz;
+      if(Math.sqrt(dx*dx+dz*dz)<4 && Math.abs(P.pos.y-ve.sy)<4){
+        inCave=true;
+        P.pos.set(ve.sx, VENT_FLOOR+.6, ve.sz); P.vel.set(0,0,0);
+        playFX('grab');
+        showMessage('🕳️ Entered underground tunnels… watch for spiders!',2500); return;
+      }
+    }
   }
-  // Cave exit (tunnels → surface)
-  if(inCave && P.pos.distanceTo(caveExitMarkerPos)<3){
-    inCave=false;
-    P.pos.set(CAVE_POS.x, CAVE_POS.y+1.5, CAVE_POS.z+3);
-    P.vel.set(0,0,0); playFX('grab');
-    showMessage('☀️ Back on the surface!',1500); return;
+  // Vent exit (underground → surface)
+  if(inCave){
+    for(const ve of VENT_ENTRIES){
+      const dx=P.pos.x-ve.sx, dz=P.pos.z-ve.sz;
+      if(Math.sqrt(dx*dx+dz*dz)<4 && Math.abs(P.pos.y-VENT_FLOOR)<3){
+        inCave=false;
+        P.pos.set(ve.sx, ve.sy+1.5, ve.sz); P.vel.set(0,0,0);
+        playFX('grab');
+        showMessage('☀️ Back on the surface!',1500); return;
+      }
+    }
   }
   // Bazooka chest
   if(bazookaChest&&bazookaChest.active&&P.pos.distanceTo(bazookaChest.pos)<3.5){
@@ -2602,7 +2626,7 @@ function interact(){
   if(inPlane){
     inPlane=false; stopJetEngine();
     // Plane keeps its current velocity and pitches into the ground
-    planeCrashing=true;
+    planeCrashing=true; planeLanding=false;
     planeCrashVel.set(Math.sin(planeYaw)*52, -8, Math.cos(planeYaw)*52);
     P.vel.set(-Math.sin(planeYaw)*4, 6, -Math.cos(planeYaw)*4); // player flung backward
     showMessage('🪂 Bailed out!',1500); playFX('jump'); return;
@@ -2765,11 +2789,11 @@ function updateInteractPrompt(){
     if(elevatorMoving!==0&&onElevator){ip.innerHTML='🏗️ Elevator moving…';ip.style.display='block';return;}
   }
   if(P.pos.distanceTo(SHOP_POS)<4){ip.innerHTML='<span class="key-hint">E</span> 🏪 Weapon Shop — $'+playerMoney;ip.style.display='block';return;}
-  if(!inCave&&P.pos.distanceTo(CAVE_POS)<4){ip.innerHTML='<span class="key-hint">E</span> 🕳️ Enter Cave Tunnels';ip.style.display='block';return;}
-  if(inCave&&P.pos.distanceTo(caveExitMarkerPos)<3){ip.innerHTML='<span class="key-hint">E</span> ☀️ Exit Cave';ip.style.display='block';return;}
+  if(!inCave){for(const ve of VENT_ENTRIES){const dx=P.pos.x-ve.sx,dz=P.pos.z-ve.sz;if(Math.sqrt(dx*dx+dz*dz)<4&&Math.abs(P.pos.y-ve.sy)<4){ip.innerHTML='<span class="key-hint">E</span> 🕳️ Enter Underground Tunnels';ip.style.display='block';return;}}}
+  if(inCave){for(const ve of VENT_ENTRIES){const dx=P.pos.x-ve.sx,dz=P.pos.z-ve.sz;if(Math.sqrt(dx*dx+dz*dz)<4&&Math.abs(P.pos.y-VENT_FLOOR)<3){ip.innerHTML='<span class="key-hint">E</span> ☀️ Exit to Surface';ip.style.display='block';return;}}}
   for(const cc of caveChests){if(!cc.collected&&P.pos.distanceTo(cc.pos)<2.8){ip.innerHTML='<span class="key-hint">E</span> 🍌 Open cave chest';ip.style.display='block';return;}}
   if(planeGroup&&!inPlane&&P.pos.distanceTo(planeGroup.position)<8){ip.innerHTML='<span class="key-hint">E</span> ✈️ Steal the plane!';ip.style.display='block';return;}
-  if(inPlane){ip.innerHTML='<span class="key-hint">E</span> ✈️ Bail out';ip.style.display='block';return;}
+  if(inPlane){ip.innerHTML='<span class="key-hint">E</span> ✈️ Bail out &nbsp;·&nbsp; <span class="key-hint">L</span> Land &nbsp;·&nbsp; Q/R/Z/X/Shift=Tricks';ip.style.display='block';return;}
   if(bazookaChest&&bazookaChest.active&&P.pos.distanceTo(bazookaChest.pos)<3.5){ip.innerHTML='<span class="key-hint">E</span> 🚀 Grab Bazooka (+3 rockets)';ip.style.display='block';return;}
   if(crownPos&&!playerHasCrown&&P.pos.distanceTo(crownPos)<3){ip.innerHTML='<span class="key-hint">E</span> 👑 Grab King\'s Crown';ip.style.display='block';return;}
   if(P.pos.distanceTo(stashPos)<5&&(P.carried>0||playerHasCrown)){ip.innerHTML='<span class="key-hint">E</span> Stash bananas'+(playerHasCrown?' + Crown':'');ip.style.display='block';return;}
@@ -2825,8 +2849,11 @@ function drawMinimap(){
   C.fillStyle='#99BBCC'; C.beginPath(); C.moveTo(mtm.x,mtm.y-7); C.lineTo(mtm.x+5,mtm.y+3); C.lineTo(mtm.x-5,mtm.y+3); C.closePath(); C.fill();
   // Bazooka chest marker
   if(bazookaChest&&bazookaChest.active){const bcm=mm(bazookaChest.pos.x,bazookaChest.pos.z);C.fillStyle='#FF8800';C.beginPath();C.arc(bcm.x,bcm.y,3,0,Math.PI*2);C.fill();}
-  // Cave marker
-  const cvm=mm(CAVE_POS.x,CAVE_POS.z); C.fillStyle='#4488FF'; C.beginPath(); C.arc(cvm.x,cvm.y,3,0,Math.PI*2); C.fill();
+  // Vent markers
+  C.fillStyle='#00FFAA';
+  for(const ve of VENT_ENTRIES){const vm=mm(ve.sx,ve.sz);C.beginPath();C.arc(vm.x,vm.y,3,0,Math.PI*2);C.fill();}
+  // Cave pos legacy marker (keep for reference if needed)
+  // const cvm=mm(CAVE_POS.x,CAVE_POS.z); C.fillStyle='#4488FF'; C.beginPath(); C.arc(cvm.x,cvm.y,3,0,Math.PI*2); C.fill();
   // Player
   const pl=mm(P.pos.x,P.pos.z);
   C.fillStyle='#fff'; C.strokeStyle='#000'; C.lineWidth=1;
@@ -3494,7 +3521,7 @@ function setupInput(){
     }
     if(e.code==='KeyF') grabVine();
     if(e.code==='KeyE') interact();
-    if(e.code==='KeyR') startReload();
+    if(e.code==='KeyR' && !inPlane) startReload();
     if(e.code==='Escape') togglePause();
     if(e.code==='Digit1') switchWeapon(0);
     if(e.code==='Digit2') switchWeapon(1);
@@ -3503,6 +3530,33 @@ function setupInput(){
     if(e.code==='Digit5') switchWeapon(4);
     if(e.code==='KeyG') throwBanana();
     if(e.code==='KeyM') toggleMute();
+    // Plane landing
+    if((e.code==='KeyL') && inPlane && !planeLanding && !planeCrashing){
+      planeLanding=true;
+      announce('🛬 Landing sequence…');
+      showMessage('🛬 LANDING… Keep flying level!',2000);
+    }
+    // Plane tricks
+    if(inPlane && !planeLanding && !planeCrashing && trickCD<=0){
+      const noTrick=barrelRollTimer<=0&&loopTimer<=0&&aileronRollTimer<=0&&divePullTimer<=0;
+      if(e.code==='KeyQ' && noTrick){
+        barrelRollTimer=1.2; barrelRollDir=1; trickCD=3;
+        showMessage('🤸 BARREL ROLL!',1200);
+      }
+      if(e.code==='KeyR' && noTrick){
+        loopTimer=2.5; trickCD=3;
+        showMessage('🤸 LOOP-THE-LOOP!',1200);
+      }
+      if(e.code==='KeyZ' && noTrick){
+        aileronRollTimer=0.8; trickCD=3;
+        showMessage('🤸 AILERON ROLL!',800);
+      }
+      if(e.code==='KeyX' && noTrick){
+        divePullTimer=1.5; trickCD=3;
+        showMessage('🤸 DIVE-PULL!',1200);
+      }
+    }
+    // Boost on shift handled via keys[] in updatePlane
   });
   document.addEventListener('keyup',e=>{keys[e.code]=false;});
   document.addEventListener('mousemove',e=>{if(!locked)return;mouseDX+=e.movementX;mouseDY+=e.movementY;});
@@ -3593,6 +3647,7 @@ function winGame(){
 // ────────────────────────────────────────────────
 function animate(){
   requestAnimationFrame(animate);
+  const _nowT=Date.now(); // cache once per frame — reused for flicker/animations
   const rawDt=Math.min(clock.getDelta(),.05);
   // Slow-mo timer
   if(slowmoTimer>0){
@@ -3618,7 +3673,7 @@ function animate(){
     // Blood rain from bird corpse
     if(birdCorpseGroup){
       birdBloodTimer-=dt;
-      if(birdBloodTimer<=0){
+      if(birdBloodTimer<=0 && sparks.length<80){
         birdBloodTimer=.04+Math.random()*.05;
         const bp=birdCorpseGroup.position;
         for(let i=0;i<3;i++){
@@ -3639,12 +3694,12 @@ function animate(){
     // Kill streak timer
     if(killStreakTimer>0){killStreakTimer-=dt;if(killStreakTimer<=0)killStreak=0;}
     updateInteractPrompt(); updateStatsHUD(); drawMinimap(); renderVineLine();
-    if(pondMesh) pondMesh.material.opacity=.8+Math.sin(Date.now()*.001)*.05;
+    if(pondMesh) pondMesh.material.opacity=.8+Math.sin(_nowT*.001)*.05;
     // Campfire flicker
     if(window._campfire){
       const fl=window._campfire.userData.fireLight;
       const fm=window._campfire.userData.flame;
-      if(fl) fl.intensity=2+Math.sin(Date.now()*.018)*0.8+Math.random()*0.4;
+      if(fl) fl.intensity=2+Math.sin(_nowT*.018)*0.8+Math.random()*0.4;
       if(fm) fm.scale.set(0.9+Math.random()*.25, 0.9+Math.random()*.3, 0.9+Math.random()*.25);
     }
   }
@@ -4234,11 +4289,12 @@ function spawnGirlfriendHeart(){
 //  CAVE TUNNEL SYSTEM
 // ────────────────────────────────────────────────
 function buildCaveSystem(){
-  const cx=CAVE_POS.x, cz=CAVE_POS.z;
-  const flY=th(cx,cz)-8; caveFloorY=flY; // 8 units underground
+  // ── Fixed underground level ─────────────────────
+  caveFloorY = VENT_FLOOR;
+  const flY  = VENT_FLOOR;
   const cH=4.5; // corridor height
   const cW=5.5; // main corridor width
-  const sW=3.4; // secret passage width (intentionally narrow)
+  const sW=3.4; // secret passage width
 
   const rockMat  =new THREE.MeshLambertMaterial({color:0x222220,side:THREE.DoubleSide});
   const floorMat =new THREE.MeshLambertMaterial({color:0x161614});
@@ -4263,6 +4319,7 @@ function buildCaveSystem(){
   }
   // Build a corridor segment (no end walls — junctions stay open)
   function seg(ax,az,bx,bz,w){
+    w=w||cW;
     const isNS=Math.abs(bz-az)>=Math.abs(bx-ax);
     const mx=(ax+bx)/2, mz=(az+bz)/2;
     const lenX=Math.abs(bx-ax)||0.001, lenZ=Math.abs(bz-az)||0.001;
@@ -4315,64 +4372,105 @@ function buildCaveSystem(){
     TUNNEL_WALLS.push({minX:rcx-rW/2,maxX:rcx+rW/2,minZ:rcz+rL/2-.05,maxZ:rcz+rL/2+.5}); // south
     STAIR_ZONES.push({minX:rcx-rW/2,maxX:rcx+rW/2,minZ:rcz-rL/2,maxZ:rcz+rL/2,axis:'flat',h0:flY,noAutoLift:true});
   }
+  // Build a glowing hatch/manhole marker at a surface position
+  function addHatch(vx,vz){
+    const sy=th(vx,vz);
+    VENT_ENTRIES.push({sx:vx, sz:vz, sy:sy});
+    const hatchMat=new THREE.MeshBasicMaterial({color:0x00FFAA,transparent:true,opacity:.75,side:THREE.DoubleSide});
+    const ring=new THREE.Mesh(new THREE.TorusGeometry(1.2,.12,6,24),hatchMat);
+    ring.rotation.x=Math.PI/2; ring.position.set(vx,sy+.3,vz); scene.add(ring);
+    const rL=new THREE.PointLight(0x00FFAA,2.5,10); rL.position.set(vx,sy+1,vz); scene.add(rL);
+    // Cap plate (dark metal)
+    const capMat=new THREE.MeshLambertMaterial({color:0x333330});
+    const cap=new THREE.Mesh(new THREE.CylinderGeometry(1.1,1.1,.12,10),capMat);
+    cap.position.set(vx,sy+.06,vz); scene.add(cap);
+    (function spinRing(){ requestAnimationFrame(spinRing); ring.rotation.z+=.015; })();
+  }
 
-  // ── Layout ──────────────────────────────────────
-  // Main N-S corridor: from entrance (cz) northward (cz-36)
-  seg(cx, cz, cx, cz-36, cW);
-  // West branch at z=cz-16 → spider den
-  seg(cx, cz-16, cx-24, cz-16, cW);
-  // Spider den room
-  const denX=cx-30, denZ=cz-16;
+  // ── Surface entry hatches (5 locations) ────────
+  // A: south of castle gate
+  addHatch(0, 15);
+  // B: near home base/cabin
+  addHatch(-130, -130);
+  // C: original cave area
+  addHatch(-100, 100);
+  // D: northeast jungle
+  addHatch(130, 130);
+  // E: north area
+  addHatch(80, -130);
+
+  // ── Tunnel network (all at y=VENT_FLOOR) ────────
+  // Hub room at (0,0)
+  mkRoom(0, 0, 10, 10);
+  // EW backbone: (-130,0) → (130,0)
+  seg(-130, 0, 130, 0);
+  // From hub north: (0,0) → (0,-130) then (0,-130) → (80,-130) [reaches E]
+  seg(0, 0, 0, -130);
+  seg(0, -130, 80, -130);
+  // From hub south: (0,0) → (0,100) then (0,100) → (-100,100) [reaches C]
+  seg(0, 0, 0, 100);
+  seg(0, 100, -100, 100);
+  // From hub SW stub: (-130,0) → (-130,-130) [reaches B]
+  seg(-130, 0, -130, -130);
+  // From hub SE stub: (130,0) → (130,130) [reaches D]
+  seg(130, 0, 130, 130);
+  // Near A: short connector (0,0) → (0,15)
+  seg(0, 0, 0, 15);
+
+  // ── Spider den (off SW branch) ─────────────────
+  const denX=-130, denZ=-60;
   mkRoom(denX, denZ, 12, 10);
-  // Secret passage (east, narrow) — starts partway along the east wall, hard to spot
-  // Junction gap: the east wall of the main corridor is open from z=cz-35 to z=cz-32
-  // (achieved by building the east side wall in two pieces via the seg() call above—
-  //  the junction is simply left in the tunnel_walls gap zone)
-  seg(cx, cz-34, cx+18, cz-34, sW);   // east passage
-  seg(cx+18, cz-34, cx+18, cz-50, sW); // north bend
-  // Hidden room — extra secret, green crystals
-  const secX=cx+18, secZ=cz-57;
+  // Den stub connecting to SW branch
+  seg(-130, -60, -130, -40);
+
+  // ── Secret chest room (off NE branch, near D) ──
+  const secX=115, secZ=115;
   mkRoom(secX, secZ, 12, 10);
+  // Secret passage from D vent corridor
+  seg(130, 130, 115, 130);
+  seg(115, 130, 115, 115, sW);
 
-  // ── Stalactites ──
-  addStalactites(cx, cz-18, cW/2, 18, 14); // main corridor
-  addStalactites(denX, denZ, 6, 5, 10);     // den
-  addStalactites(secX, secZ, 6, 5, 8);      // secret room
+  // ── Stalactites throughout main corridors ──
+  addStalactites(0, 0, 5, 5, 8);       // hub
+  addStalactites(0, -65, 2, 65, 16);   // N corridor
+  addStalactites(40, -130, 40, 2, 10); // N-E branch
+  addStalactites(0, 50, 2, 50, 12);    // S corridor
+  addStalactites(-50, 100, 50, 2, 10); // S-W branch
+  addStalactites(-130, -65, 2, 65, 12);// SW stub
+  addStalactites(130, 65, 2, 65, 12);  // SE stub
+  addStalactites(denX, denZ, 6, 5, 10);
+  addStalactites(secX, secZ, 6, 5, 8);
 
-  // ── Blue crystals in main corridor ──
+  // ── Blue crystals scattered through main EW backbone ──
   const cryMat=new THREE.MeshBasicMaterial({color:0x2244FF,transparent:true,opacity:.65});
-  for(let i=0;i<8;i++){
-    const sx=cx+(Math.random()-.5)*4.5, sz=cz-3-Math.random()*33;
+  for(let i=0;i<16;i++){
+    const sx=-120+i*15+(Math.random()-.5)*8;
     const cr=new THREE.Mesh(new THREE.ConeGeometry(.18,.75,4),cryMat);
-    cr.position.set(sx,flY+.4,sz); cr.rotation.x=.25+Math.random()*.2; scene.add(cr);
-    const crL=new THREE.PointLight(0x2244FF,1.2,8); crL.position.set(sx,flY+.9,sz); scene.add(crL);
+    cr.position.set(sx,flY+.4,(Math.random()-.5)*3); cr.rotation.x=.25+Math.random()*.2; scene.add(cr);
+    const crL=new THREE.PointLight(0x2244FF,1.2,8); crL.position.set(sx,flY+.9,0); scene.add(crL);
   }
 
-  // ── Torches — dense placement so every passage is well lit ──
-  // Main N-S corridor (every ~6 units)
-  for(let tz=cz-5;tz>=cz-35;tz-=6){
-    const side=(Math.round((cz-tz)/6)%2===0)?-2:2;
-    addTorch(cx+side,flY+1.4,tz);
-  }
-  // West branch to den
-  for(let tx=cx-6;tx>=cx-24;tx-=6){
-    const side=(Math.round((cx-tx)/6)%2===0)?0:-0;
-    addTorch(tx,flY+1.4,cz-16);
-  }
-  // East secret passage horizontal
-  for(let tx=cx+4;tx<=cx+17;tx+=6) addTorch(tx,flY+1.4,cz-34);
-  // Secret passage vertical bend
-  for(let tz=cz-39;tz>=cz-49;tz-=6) addTorch(cx+18,flY+1.4,tz);
-  // Den torches (4 corners)
-  addTorch(denX-4,flY+1.4,denZ-3);
-  addTorch(denX+4,flY+1.4,denZ-3);
-  addTorch(denX-4,flY+1.4,denZ+3);
-  addTorch(denX+4,flY+1.4,denZ+3);
-  // Secret room green torches (4 corners)
-  addTorch(secX-4,flY+1.4,secZ-3,0x007700);
-  addTorch(secX+4,flY+1.4,secZ-3,0x007700);
-  addTorch(secX-4,flY+1.4,secZ+3,0x007700);
-  addTorch(secX+4,flY+1.4,secZ+3,0x007700);
+  // ── Torches — place every ~20 units along main corridors ──
+  // EW backbone
+  for(let tx=-120;tx<=120;tx+=20) addTorch(tx,flY+1.4,(Math.random()-.5)*2);
+  // N corridor
+  for(let tz=-20;tz>=-120;tz-=20) addTorch((Math.random()-.5)*2,flY+1.4,tz);
+  // NE branch
+  for(let tx=10;tx<=70;tx+=20) addTorch(tx,flY+1.4,-130);
+  // S corridor
+  for(let tz=20;tz<=90;tz+=20) addTorch((Math.random()-.5)*2,flY+1.4,tz);
+  // SW branch S corridor
+  for(let tx=-10;tx>=-90;tx-=20) addTorch(tx,flY+1.4,100);
+  // SW stub
+  for(let tz=-20;tz>=-120;tz-=20) addTorch(-130,flY+1.4,tz);
+  // SE stub
+  for(let tz=20;tz<=120;tz+=20) addTorch(130,flY+1.4,tz);
+  // Den torches
+  addTorch(denX-4,flY+1.4,denZ-3); addTorch(denX+4,flY+1.4,denZ-3);
+  addTorch(denX-4,flY+1.4,denZ+3); addTorch(denX+4,flY+1.4,denZ+3);
+  // Secret room green torches
+  addTorch(secX-4,flY+1.4,secZ-3,0x007700); addTorch(secX+4,flY+1.4,secZ-3,0x007700);
+  addTorch(secX-4,flY+1.4,secZ+3,0x007700); addTorch(secX+4,flY+1.4,secZ+3,0x007700);
   const gl=new THREE.PointLight(0x00AA44,3,22); gl.position.set(secX,flY+3,secZ); scene.add(gl);
 
   // ── Den: spider webs ──
@@ -4381,15 +4479,6 @@ function buildCaveSystem(){
     const web=new THREE.Mesh(new THREE.CircleGeometry(1.3+Math.random()*.5,8),webMat);
     web.rotation.y=Math.random()*Math.PI; web.rotation.x=Math.PI/2+(Math.random()-.5)*.4;
     web.position.set(denX+wo,flY+2.5,denZ+wz); scene.add(web);
-  }
-
-  // ── Boulder cluster at secret junction to hide it ──
-  const boulMat=new THREE.MeshLambertMaterial({color:0x252520});
-  for(let i=0;i<5;i++){
-    const a=(i/5)*Math.PI*2;
-    const bl=new THREE.Mesh(new THREE.DodecahedronGeometry(.55+Math.random()*.35,0),boulMat);
-    bl.position.set(cx+.9+Math.cos(a)*.7,flY+.5,cz-34+Math.sin(a)*.7);
-    bl.rotation.set(Math.random()*2,Math.random()*2,Math.random()*2); scene.add(bl);
   }
 
   // ── Green crystals in secret room only ──
@@ -4405,24 +4494,17 @@ function buildCaveSystem(){
   buildCaveChest(new THREE.Vector3(secX-3,flY+.6,secZ-2));
   buildCaveChest(new THREE.Vector3(secX+3,flY+.6,secZ+2));
 
-  // ── Spiders: 4 in den, 2 in main corridor ──
+  // ── Spiders: 4 in den, 2 in main hub ──
   spiders.push(new Spider(denX-3,denZ-2,flY));
   spiders.push(new Spider(denX+3,denZ+2,flY));
   spiders.push(new Spider(denX-2,denZ+3,flY));
   spiders.push(new Spider(denX+3,denZ-3,flY));
-  spiders.push(new Spider(cx,cz-12,flY));
-  spiders.push(new Spider(cx,cz-26,flY));
+  spiders.push(new Spider(0,-20,flY));
+  spiders.push(new Spider(0,20,flY));
 
-  // ── Entry / exit markers ──
-  caveTunnelEntryPos.set(cx, flY+.6, cz-3);
-  caveExitMarkerPos.set(cx, flY+.6, cz-2);
-
-  // ── Exit ring (glowing so player can find it) ──
-  const exitMat=new THREE.MeshBasicMaterial({color:0x00FFAA,transparent:true,opacity:.75,side:THREE.DoubleSide});
-  const exitRing=new THREE.Mesh(new THREE.TorusGeometry(1.2,.12,6,24),exitMat);
-  exitRing.rotation.x=Math.PI/2; exitRing.position.set(cx,flY+.3,cz-2); scene.add(exitRing);
-  const exitL=new THREE.PointLight(0x00FFAA,2.5,10); exitL.position.set(cx,flY+1,cz-2); scene.add(exitL);
-  (function spinExit(){ requestAnimationFrame(spinExit); exitRing.rotation.z+=.015; })();
+  // ── Legacy entry/exit positions (kept for compatibility) ──
+  caveTunnelEntryPos.set(0, flY+.6, 10);
+  caveExitMarkerPos.set(0, flY+.6, 10);
 }
 function buildCaveChest(pos){
   const wm=new THREE.MeshLambertMaterial({color:0x3a2010});
@@ -4581,10 +4663,12 @@ function updateBird(dt){
 //  PLANE CRASH
 // ────────────────────────────────────────────────
 function crashPlane(){
-  if(!planeGroup) return;
+  if(!planeGroup) return; // guard: planeGroup=null is set immediately — prevents re-entry
   const pos=planeGroup.position.clone();
   pos.y=th(pos.x,pos.z)+0.5;
-  scene.remove(planeGroup); planeGroup=null;
+  scene.remove(planeGroup); planeGroup=null; // null FIRST so re-entry is blocked
+  planeLanding=false; planeCrashing=false; inPlane=false;
+  try{
 
   // ── Chain of explosions ────────────────────────
   const boom=(ox,oy,oz,delay)=>{
@@ -4665,6 +4749,7 @@ function crashPlane(){
   doShake(3.5,2.2);
   announce('💥 F-22 DESTROYED!');
   showMessage('🔥🔥 F-22 CRASHED AND BURNED! 🔥🔥',4000);
+  }catch(e){ console.warn('crashPlane error:',e); }
 }
 
 // ────────────────────────────────────────────────
@@ -5079,7 +5164,7 @@ function updatePlane(dt){
     planeGroup.rotation.z += dt*1.1;  // rolling spin
     const gH = th(planeGroup.position.x, planeGroup.position.z);
     if(planeGroup.position.y <= gH + 1.5){
-      planeCrashing = false;
+      planeCrashing = false; // clear flag BEFORE calling crashPlane to prevent re-entry
       crashPlane();
     }
     return;
@@ -5090,8 +5175,87 @@ function updatePlane(dt){
     if(planeGroup.userData.engLights) planeGroup.userData.engLights.forEach(l=>l.intensity=0);
     return;
   }
-  // Steering is mouse-only (handled in updateCamera before this runs)
-  const spd=26;
+
+  // ── Landing sequence ─────────────────────────
+  if(planeLanding){
+    // Pitch nose gently downward
+    planePitchAng = Math.max(-0.15, planePitchAng - dt*0.06);
+    const spdLand = 18;
+    const fwdL = new THREE.Vector3(Math.sin(planeYaw), -planePitchAng, Math.cos(planeYaw)).normalize();
+    planeGroup.position.addScaledVector(fwdL, spdLand*dt);
+    planeGroup.rotation.y = planeYaw;
+    planeGroup.rotation.x = planePitchAng*0.6;
+    planeGroup.rotation.z *= (1-dt*3); // level wings
+    planeGroup.position.x = Math.max(-MAP/2+10,Math.min(MAP/2-10,planeGroup.position.x));
+    planeGroup.position.z = Math.max(-MAP/2+10,Math.min(MAP/2-10,planeGroup.position.z));
+    const thLand = th(planeGroup.position.x, planeGroup.position.z);
+    // Approach: level off as we near ground
+    if(planeGroup.position.y < thLand+12){
+      planePitchAng = planePitchAng * (1-dt*3); // recover pitch toward 0
+    }
+    if(planeGroup.position.y <= thLand + 2.5){
+      // Snap to ground — safe landing
+      planeGroup.position.y = thLand + 0.5;
+      planeGroup.rotation.set(0, planeYaw, 0);
+      planeLanding = false; inPlane = false;
+      stopJetEngine();
+      // Place player beside plane
+      P.pos.set(planeGroup.position.x - Math.sin(planeYaw)*6,
+                thLand + 1.8,
+                planeGroup.position.z - Math.cos(planeYaw)*6);
+      P.vel.set(0,0,0);
+      announce('✅ Landed safely!');
+      showMessage('✅ LANDED SAFELY! Press E to re-enter plane.',3000);
+      return;
+    }
+    // Update player cockpit pos during landing
+    const cpOfsL=new THREE.Vector3(3.5,1.5,0); cpOfsL.applyQuaternion(planeGroup.quaternion);
+    P.pos.copy(planeGroup.position).add(cpOfsL);
+    P.vel.set(0,0,0); P.onGround=false;
+    const glowL=1.5+Math.sin(Date.now()*.025)*.3;
+    if(planeGroup.userData.engLights) planeGroup.userData.engLights.forEach(l=>l.intensity=glowL);
+    updateMissiles(dt);
+    return;
+  }
+
+  // ── Boost (Shift hold) ───────────────────────
+  planeBoosting = !!(keys['ShiftLeft']||keys['ShiftRight']);
+
+  // ── Trick timers ─────────────────────────────
+  trickCD = Math.max(0, trickCD-dt);
+  const doingTrick = barrelRollTimer>0 || loopTimer>0 || aileronRollTimer>0 || divePullTimer>0;
+
+  // Barrel roll (Q) — 1.2s full 360° on Z
+  if(barrelRollTimer>0){
+    barrelRollTimer -= dt;
+    planeGroup.rotation.z += barrelRollDir * (Math.PI*2 / 1.2) * dt;
+    if(barrelRollTimer<=0){ barrelRollTimer=0; }
+  }
+  // Loop-the-loop (R) — 2.5s full pitch loop
+  if(loopTimer>0){
+    loopTimer -= dt;
+    planePitchAng += (Math.PI*2 / 2.5) * dt;
+    if(planePitchAng>Math.PI) planePitchAng -= Math.PI*2; // wrap
+    if(loopTimer<=0){ loopTimer=0; planePitchAng=0; }
+  }
+  // Aileron roll (Z) — 0.8s full 2π on Z
+  if(aileronRollTimer>0){
+    aileronRollTimer -= dt;
+    planeGroup.rotation.z += (Math.PI*2 / 0.8) * dt;
+    if(aileronRollTimer<=0){ aileronRollTimer=0; }
+  }
+  // Dive-pull (X) — 1.5s: nose down then recover
+  if(divePullTimer>0){
+    divePullTimer -= dt;
+    const phase = 1.5 - divePullTimer;
+    if(phase<0.5) planePitchAng = -0.7*(phase/0.5);        // nose down
+    else planePitchAng = -0.7*(1-(phase-0.5)/1.0);         // recover
+    if(divePullTimer<=0){ divePullTimer=0; planePitchAng=0; }
+  }
+
+  // ── Normal flight ────────────────────────────
+  const boostMult = (planeBoosting && !doingTrick) ? 2.0 : 1.0;
+  const spd = 26 * boostMult;
   const fwd=new THREE.Vector3(Math.sin(planeYaw),-planePitchAng,Math.cos(planeYaw)).normalize();
   planeGroup.position.addScaledVector(fwd,spd*dt);
   const minY=th(planeGroup.position.x,planeGroup.position.z)+5;
@@ -5100,26 +5264,31 @@ function updatePlane(dt){
   planeGroup.position.z=Math.max(-MAP/2+10,Math.min(MAP/2-10,planeGroup.position.z));
   if(checkPlaneCollision()) return; // plane crashed into geometry
   planeGroup.rotation.y=planeYaw;
-  planeGroup.rotation.x=planePitchAng*.6;
-  // Bank/roll visual — derived from how fast yaw is changing (mouse turn rate)
-  const yawRate=(planeYaw-(planeGroup.userData.prevYaw||planeYaw))/Math.max(dt,.001);
-  planeGroup.userData.prevYaw=planeYaw;
-  const bankTarget=Math.max(-0.55,Math.min(0.55,-yawRate*0.22));
-  planeGroup.rotation.z+=(bankTarget-planeGroup.rotation.z)*Math.min(1,dt*5);
+  if(!doingTrick) planeGroup.rotation.x=planePitchAng*.6;
+  // Bank/roll visual — only when not doing a trick
+  if(!doingTrick){
+    const yawRate=(planeYaw-(planeGroup.userData.prevYaw||planeYaw))/Math.max(dt,.001);
+    planeGroup.userData.prevYaw=planeYaw;
+    const bankTarget=Math.max(-0.55,Math.min(0.55,-yawRate*0.22));
+    planeGroup.rotation.z+=(bankTarget-planeGroup.rotation.z)*Math.min(1,dt*5);
+  } else {
+    planeGroup.userData.prevYaw=planeYaw;
+  }
   // Player in cockpit
   const cpOfs=new THREE.Vector3(3.5,1.5,0); cpOfs.applyQuaternion(planeGroup.quaternion);
   P.pos.copy(planeGroup.position).add(cpOfs);
   P.vel.set(0,0,0); P.onGround=false;
-  // Engine glow — flicker
-  const glow=2.5+Math.sin(Date.now()*.025)*.5;
+  // Engine glow — boost makes it brighter
+  const nowT=Date.now();
+  const glow=(planeBoosting?4.5:2.5)+Math.sin(nowT*.025)*.5;
   if(planeGroup.userData.engLights) planeGroup.userData.engLights.forEach(l=>l.intensity=glow);
-  if(planeGroup.userData.exhaustMeshes) planeGroup.userData.exhaustMeshes.forEach(m=>m.material.opacity=.7+Math.random()*.3);
+  if(planeGroup.userData.exhaustMeshes) planeGroup.userData.exhaustMeshes.forEach(m=>m.material.opacity=planeBoosting?1.0:(.7+Math.random()*.3));
   // Gun fire
   planeGunCD=Math.max(0,planeGunCD-dt);
   if(leftMouse) firePlaneCannons();
   // Missile HUD
   const mhud=document.getElementById('plane-hud');
-  if(mhud) mhud.textContent=`🚀 ${planeMissileCount} missiles · SPACE to fire`;
+  if(mhud) mhud.textContent=`🚀 ${planeMissileCount} missiles · SPACE=fire · L=land · Q/R/Z/X=tricks`;
   updateMissiles(dt);
 }
 
@@ -6007,7 +6176,7 @@ function updateFootsteps(dt){
 // ────────────────────────────────────────────────
 function init(){
   initThree(); buildTerrain(); buildPond(); buildCastle(); buildStairs(); buildStash(); buildRocks(); plantForest();
-  buildHomeBase(); buildGirlfriend(); buildBarrels(); buildCrates(); buildMonkeyVillage(); buildCave(); buildCaveSystem(); buildMountain(); buildZiplines(); buildPlane();
+  buildHomeBase(); buildGirlfriend(); buildBarrels(); buildCrates(); buildMonkeyVillage(); buildCaveSystem(); buildMountain(); buildZiplines(); buildPlane();
   buildFort(-60,-56); buildFort(56,-70); buildFort(-76,56); buildFort(90,30);
   buildPlayer(); placeBananas(); spawnMonkeys(); placeAmmoPickups();
   // Set mountain perch chest spot y now that STAIR_ZONES are registered
