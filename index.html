@@ -457,6 +457,7 @@ let   caveFloorY  = 0;
 const VENT_FLOOR  = -20;  // fixed underground level (absolute y)
 const VENT_ENTRIES = [];   // {sx,sz,sy} — populated in buildCaveSystem
 const TUNNEL_WALLS = [];  // AABB side walls — only enforced while inCave
+const TUNNEL_ZONES = [];  // walkable corridor boxes — player must stay inside when inCave
 const HUT_WALLS    = [];  // AABB walls for cabin — always enforced
 const caveTunnelEntryPos = new THREE.Vector3();
 const caveExitMarkerPos  = new THREE.Vector3();
@@ -2223,6 +2224,24 @@ function resolveCollisions(){
     // Ceiling clamp so player can't jump through
     const caveCeil=caveFloorY+4.5-1.9;
     if(P.pos.y>caveCeil){P.pos.y=caveCeil;P.vel.y=Math.min(0,P.vel.y);}
+
+    // Zone containment — if player escaped into solid rock, snap back to nearest corridor
+    let inAnyZone=false;
+    for(const z of TUNNEL_ZONES){
+      if(P.pos.x+PR>z.minX&&P.pos.x-PR<z.maxX&&P.pos.z+PR>z.minZ&&P.pos.z-PR<z.maxZ){
+        inAnyZone=true; break;
+      }
+    }
+    if(!inAnyZone){
+      let best=Infinity, nx=P.pos.x, nz=P.pos.z;
+      for(const z of TUNNEL_ZONES){
+        const cx=Math.max(z.minX+PR,Math.min(z.maxX-PR,P.pos.x));
+        const cz=Math.max(z.minZ+PR,Math.min(z.maxZ-PR,P.pos.z));
+        const d=(P.pos.x-cx)**2+(P.pos.z-cz)**2;
+        if(d<best){best=d;nx=cx;nz=cz;}
+      }
+      P.pos.x=nx; P.pos.z=nz; P.vel.x=0; P.vel.z=0;
+    }
   }
 }
 
@@ -4377,9 +4396,14 @@ function buildCaveSystem(){
       TUNNEL_WALLS.push({minX:Math.min(ax,bx)-.3,maxX:Math.max(ax,bx)+.3,minZ:mz-w/2-.55,maxZ:mz-w/2+.05});
       TUNNEL_WALLS.push({minX:Math.min(ax,bx)-.3,maxX:Math.max(ax,bx)+.3,minZ:mz+w/2-.05,maxZ:mz+w/2+.55});
     }
-    // STAIR_ZONE
-    if(isNS) STAIR_ZONES.push({minX:mx-w/2,maxX:mx+w/2,minZ:Math.min(az,bz),maxZ:Math.max(az,bz),axis:'flat',h0:flY,noAutoLift:true});
-    else     STAIR_ZONES.push({minX:Math.min(ax,bx),maxX:Math.max(ax,bx),minZ:mz-w/2,maxZ:mz+w/2,axis:'flat',h0:flY,noAutoLift:true});
+    // STAIR_ZONE + walkable zone
+    if(isNS){
+      STAIR_ZONES.push({minX:mx-w/2,maxX:mx+w/2,minZ:Math.min(az,bz),maxZ:Math.max(az,bz),axis:'flat',h0:flY,noAutoLift:true});
+      TUNNEL_ZONES.push({minX:mx-w/2,maxX:mx+w/2,minZ:Math.min(az,bz),maxZ:Math.max(az,bz)});
+    } else {
+      STAIR_ZONES.push({minX:Math.min(ax,bx),maxX:Math.max(ax,bx),minZ:mz-w/2,maxZ:mz+w/2,axis:'flat',h0:flY,noAutoLift:true});
+      TUNNEL_ZONES.push({minX:Math.min(ax,bx),maxX:Math.max(ax,bx),minZ:mz-w/2,maxZ:mz+w/2});
+    }
   }
   // Build a closed room (4 walls)
   function mkRoom(rcx,rcz,rW,rL){
@@ -4402,6 +4426,7 @@ function buildCaveSystem(){
     TUNNEL_WALLS.push({minX:rcx-rW/2,maxX:rcx+rW/2,minZ:rcz-rL/2-.5,maxZ:rcz-rL/2+.05}); // north
     TUNNEL_WALLS.push({minX:rcx-rW/2,maxX:rcx+rW/2,minZ:rcz+rL/2-.05,maxZ:rcz+rL/2+.5}); // south
     STAIR_ZONES.push({minX:rcx-rW/2,maxX:rcx+rW/2,minZ:rcz-rL/2,maxZ:rcz+rL/2,axis:'flat',h0:flY,noAutoLift:true});
+    TUNNEL_ZONES.push({minX:rcx-rW/2,maxX:rcx+rW/2,minZ:rcz-rL/2,maxZ:rcz+rL/2});
   }
   // Build a glowing hatch/manhole marker at a surface position
   function addHatch(vx,vz){
