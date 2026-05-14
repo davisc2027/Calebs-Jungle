@@ -490,11 +490,8 @@ const planeCrashVel = new THREE.Vector3();
 let planeLanding    = false;  // smooth landing sequence
 // ── Plane tricks ─────────────────────────────────
 let barrelRollTimer = 0, barrelRollDir = 1;
-let loopTimer       = 0;
 let planeBoosting   = false;
-let aileronRollTimer= 0;
-let divePullTimer   = 0;
-let trickCD         = 0;  // 3s cooldown between tricks
+let trickCD         = 0;  // cooldown between tricks
 
 // ── Bird corpse ───────────────────────────────────
 let birdCorpseGroup = null;
@@ -1309,9 +1306,10 @@ function spawnBanana(x,y,z){
 function placeBananas(){
   // Inside castle (ring)
   for(let i=0;i<8;i++){const a=i/8*Math.PI*2; spawnBanana(Math.cos(a)*6,.1,Math.sin(a)*6);}
-  // Near tree forts (scaled positions)
-  spawnBanana(-60,th(-60,-56),-56); spawnBanana(56,th(56,-70),-70);
-  spawnBanana(-76,th(-76,56),56);   spawnBanana(90,th(90,30),30);
+  // Extra deep jungle (replaced fort-adjacent bananas)
+  spawnBanana(-110,th(-110,60),60);  spawnBanana(85,th(85,-110),-110);
+  spawnBanana(-120,th(-120,-40),-40); spawnBanana(110,th(110,80),80);
+  spawnBanana(30,th(30,120),120);
   // Deep jungle
   spawnBanana(-90,th(-90,40),40);   spawnBanana(40,th(40,90),90);
   spawnBanana(-40,th(-40,-90),-90); spawnBanana(80,th(80,-50),-50);
@@ -3314,7 +3312,7 @@ function updateCamera(dt){
   let cx = P.pos.x - sinY*cosP*CAM_DIST - rightX*OTS_OFFSET;
   let cy = P.pos.y + sinP*CAM_DIST + CAM_H + P.camBob;
   let cz = P.pos.z - cosY*cosP*CAM_DIST - rightZ*OTS_OFFSET;
-  const camTY=th(cx,cz)+1; if(cy<camTY) cy=camTY;
+  const camTY=th(cx,cz)+1; if(!inCave && cy<camTY) cy=camTY;
   if(shakeT>0){shakeT-=dt;cx+=(Math.random()-.5)*shakeA*2;cy+=(Math.random()-.5)*shakeA;cz+=(Math.random()-.5)*shakeA*2;}
   camera.position.set(cx,cy,cz);
 
@@ -3537,23 +3535,10 @@ function setupInput(){
       showMessage('🛬 LANDING… Keep flying level!',2000);
     }
     // Plane tricks
-    if(inPlane && !planeLanding && !planeCrashing && trickCD<=0){
-      const noTrick=barrelRollTimer<=0&&loopTimer<=0&&aileronRollTimer<=0&&divePullTimer<=0;
-      if(e.code==='KeyQ' && noTrick){
+    if(inPlane && !planeLanding && !planeCrashing && trickCD<=0 && barrelRollTimer<=0){
+      if(e.code==='KeyQ'){
         barrelRollTimer=1.2; barrelRollDir=1; trickCD=3;
         showMessage('🤸 BARREL ROLL!',1200);
-      }
-      if(e.code==='KeyR' && noTrick){
-        loopTimer=2.5; trickCD=3;
-        showMessage('🤸 LOOP-THE-LOOP!',1200);
-      }
-      if(e.code==='KeyZ' && noTrick){
-        aileronRollTimer=0.8; trickCD=3;
-        showMessage('🤸 AILERON ROLL!',800);
-      }
-      if(e.code==='KeyX' && noTrick){
-        divePullTimer=1.5; trickCD=3;
-        showMessage('🤸 DIVE-PULL!',1200);
       }
     }
     // Boost on shift handled via keys[] in updatePlane
@@ -3570,6 +3555,16 @@ function setupInput(){
   document.addEventListener('mouseup',e=>{
     if(e.button===0) leftMouse=false;
     if(e.button===2&&P.scoped) setScope(false);
+  });
+  // P key — hold for scope (same as right-click, works for sniper + bazooka)
+  document.addEventListener('keydown',e=>{
+    if(e.code==='KeyP'&&gameActive&&!gamePaused&&!P.scoped){
+      if(P.weapon===2) setScope(true,'sniper');
+      else if(P.weapon===4) setScope(true,'bazooka');
+    }
+  });
+  document.addEventListener('keyup',e=>{
+    if(e.code==='KeyP'&&P.scoped) setScope(false);
   });
   document.addEventListener('contextmenu',e=>e.preventDefault());
   const cv=document.getElementById('c');
@@ -5209,7 +5204,7 @@ function updatePlane(dt){
       return;
     }
     // Update player cockpit pos during landing
-    const cpOfsL=new THREE.Vector3(3.5,1.5,0); cpOfsL.applyQuaternion(planeGroup.quaternion);
+    const cpOfsL=new THREE.Vector3(0,1.5,3.5); cpOfsL.applyQuaternion(planeGroup.quaternion);
     P.pos.copy(planeGroup.position).add(cpOfsL);
     P.vel.set(0,0,0); P.onGround=false;
     const glowL=1.5+Math.sin(Date.now()*.025)*.3;
@@ -5223,34 +5218,13 @@ function updatePlane(dt){
 
   // ── Trick timers ─────────────────────────────
   trickCD = Math.max(0, trickCD-dt);
-  const doingTrick = barrelRollTimer>0 || loopTimer>0 || aileronRollTimer>0 || divePullTimer>0;
+  const doingTrick = barrelRollTimer>0;
 
   // Barrel roll (Q) — 1.2s full 360° on Z
   if(barrelRollTimer>0){
     barrelRollTimer -= dt;
     planeGroup.rotation.z += barrelRollDir * (Math.PI*2 / 1.2) * dt;
     if(barrelRollTimer<=0){ barrelRollTimer=0; }
-  }
-  // Loop-the-loop (R) — 2.5s full pitch loop
-  if(loopTimer>0){
-    loopTimer -= dt;
-    planePitchAng += (Math.PI*2 / 2.5) * dt;
-    if(planePitchAng>Math.PI) planePitchAng -= Math.PI*2; // wrap
-    if(loopTimer<=0){ loopTimer=0; planePitchAng=0; }
-  }
-  // Aileron roll (Z) — 0.8s full 2π on Z
-  if(aileronRollTimer>0){
-    aileronRollTimer -= dt;
-    planeGroup.rotation.z += (Math.PI*2 / 0.8) * dt;
-    if(aileronRollTimer<=0){ aileronRollTimer=0; }
-  }
-  // Dive-pull (X) — 1.5s: nose down then recover
-  if(divePullTimer>0){
-    divePullTimer -= dt;
-    const phase = 1.5 - divePullTimer;
-    if(phase<0.5) planePitchAng = -0.7*(phase/0.5);        // nose down
-    else planePitchAng = -0.7*(1-(phase-0.5)/1.0);         // recover
-    if(divePullTimer<=0){ divePullTimer=0; planePitchAng=0; }
   }
 
   // ── Normal flight ────────────────────────────
@@ -5275,7 +5249,7 @@ function updatePlane(dt){
     planeGroup.userData.prevYaw=planeYaw;
   }
   // Player in cockpit
-  const cpOfs=new THREE.Vector3(3.5,1.5,0); cpOfs.applyQuaternion(planeGroup.quaternion);
+  const cpOfs=new THREE.Vector3(0,1.5,3.5); cpOfs.applyQuaternion(planeGroup.quaternion);
   P.pos.copy(planeGroup.position).add(cpOfs);
   P.vel.set(0,0,0); P.onGround=false;
   // Engine glow — boost makes it brighter
